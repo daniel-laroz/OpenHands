@@ -145,6 +145,7 @@ class AppConversationStartRequest(OpenHandsModel):
     system_message_suffix: str | None = None
     processors: list[EventCallbackProcessor] | None = Field(default=None)
     llm_model: str | None = None
+    auto_pause_existing: bool = Field(default=True)
 
     # Git parameters
     selected_repository: str | None = None
