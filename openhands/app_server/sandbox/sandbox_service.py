@@ -80,6 +80,11 @@ class SandboxService(ABC):
         Return False if the sandbox did not exist.
         """
 
+    async def raise_if_sandbox_limit_reached(self) -> None:
+        """Raise if at sandbox limit. Override in RemoteSandboxService when auto_pause_existing=False.
+        No-op for other implementations."""
+        return
+
     async def wait_for_sandbox_running(
         self,
         sandbox_id: str,

@@ -273,10 +273,20 @@ async def update_app_conversation(
 async def stream_app_conversation_start(
     request: AppConversationStartRequest,
     user_context: UserContext = user_context_dependency,
+    sandbox_service: SandboxService = sandbox_service_dependency,
 ) -> list[AppConversationStartTask]:
     """Start an app conversation start task and stream updates from it.
     Leaves the connection open until either the conversation starts or there was an error
     """
+
+    if not request.auto_pause_existing:
+        if not request.sandbox_id:
+            await sandbox_service.raise_if_sandbox_limit_reached()
+        else:
+            sandbox_info = await sandbox_service.get_sandbox(request.sandbox_id)
+            if sandbox_info and sandbox_info.status == SandboxStatus.PAUSED:
+                await sandbox_service.raise_if_sandbox_limit_reached()
+
     response = StreamingResponse(
         _stream_app_conversation_start(request, user_context),
         media_type='application/json',
