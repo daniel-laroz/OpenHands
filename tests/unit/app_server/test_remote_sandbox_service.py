@@ -924,6 +924,101 @@ class TestSandboxLimitPolicy:
             running_sandboxes=running_sandboxes,
         )
 
+    @pytest.mark.asyncio
+    async def test_enforce_limit_pauses_specifically_the_oldest_sandbox(
+        self, remote_sandbox_service
+    ):
+        """Test that the sandbox with the earliest created_at date is the one paused."""
+        # 1. Setup: Limit is 2, but 3 are "running"
+        remote_sandbox_service.max_num_sandboxes = 2
+
+        # Create 3 sandboxes with distinct creation times
+        oldest_time = datetime(2023, 1, 1, tzinfo=timezone.utc)
+        middle_time = datetime(2023, 1, 2, tzinfo=timezone.utc)
+        newest_time = datetime(2023, 1, 3, tzinfo=timezone.utc)
+
+        sb_oldest = create_stored_sandbox(
+            sandbox_id='oldest-id', created_at=oldest_time
+        )
+        sb_middle = create_stored_sandbox(
+            sandbox_id='middle-id', created_at=middle_time
+        )
+        sb_newest = create_stored_sandbox(
+            sandbox_id='newest-id', created_at=newest_time
+        )
+
+        # Mock _get_running_sandboxes_for_current_user to return them in ASC order (oldest first)
+        # This simulates the database order_by(created_at.asc())
+        remote_sandbox_service._get_running_sandboxes_for_current_user = AsyncMock(
+            return_value=[sb_oldest, sb_middle, sb_newest]
+        )
+
+        # Mock the pause method
+        remote_sandbox_service.pause_sandbox = AsyncMock(return_value=True)
+
+        # 2. Execute: Start a new sandbox (or manually call enforce)
+        # We need to leave (max - 1) = 1 running to make room for the new one
+        # So 3 running -> needs to pause 2 to reach 1.
+        paused_ids = await remote_sandbox_service.enforce_max_num_sandboxes_limit(
+            auto_pause_existing=True
+        )
+
+        # 3. Verify
+        # It should pause the 2 oldest ones: 'oldest-id' and 'middle-id'
+        assert len(paused_ids) == 2
+        assert 'oldest-id' in paused_ids
+        assert 'middle-id' in paused_ids
+        assert 'newest-id' not in paused_ids
+
+        # Ensure pause_sandbox was actually called with the oldest ID
+        remote_sandbox_service.pause_sandbox.assert_any_call('oldest-id')
+
+    @pytest.mark.asyncio
+    async def test_resume_sandbox_auto_pauses_when_at_limit(
+        self, remote_sandbox_service
+    ):
+        """Verify resume_sandbox successfully pauses an old sandbox to make room."""
+        # Setup: Limit is 1, and 'sb-running' is currently taking that slot
+        remote_sandbox_service.max_num_sandboxes = 1
+        sb_running = create_stored_sandbox(
+            sandbox_id='sb-running', created_at=datetime(2020, 1, 1)
+        )
+        sb_to_resume = create_stored_sandbox(
+            sandbox_id='sb-to-resume', created_at=datetime(2021, 1, 1)
+        )
+
+        # Mock the state: sb-running is in the remote 'list'
+        remote_sandbox_service._get_running_sandboxes_for_current_user = AsyncMock(
+            return_value=[sb_running]
+        )
+        remote_sandbox_service._get_stored_sandbox = AsyncMock(
+            return_value=sb_to_resume
+        )
+        remote_sandbox_service._get_runtime = AsyncMock(
+            return_value={'runtime_id': 'r-123'}
+        )
+
+        # Mock the actions
+        remote_sandbox_service.pause_sandbox = AsyncMock(return_value=True)
+        mock_response = MagicMock(status_code=200)
+        remote_sandbox_service.httpx_client.request = AsyncMock(
+            return_value=mock_response
+        )
+
+        # Execute: Try to resume while at limit with auto_pause=True
+        success = await remote_sandbox_service.resume_sandbox(
+            'sb-to-resume', auto_pause_existing=True
+        )
+
+        # Assert
+        assert success is True
+        # THIS IS THE KEY: It should have called pause on the running one
+        remote_sandbox_service.pause_sandbox.assert_called_once_with('sb-running')
+        # And then called the resume API for the target
+        assert remote_sandbox_service.httpx_client.request.call_args_list[-1][0][
+            1
+        ].endswith('/resume')
+
 
 class TestSandboxSearch:
     """Test cases for sandbox search and retrieval."""
