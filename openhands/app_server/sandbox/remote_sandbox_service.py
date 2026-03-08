@@ -690,6 +690,17 @@ class RemoteSandboxService(SandboxService):
                 )
             )
 
+    async def validate_sandbox_limit(
+        self, sandbox_id: str | None = None, auto_pause_existing: bool = True
+    ) -> None:
+        if not auto_pause_existing:
+            if not sandbox_id:
+                await self.raise_if_sandbox_limit_reached()
+            else:
+                sandbox_info = await self.get_sandbox(sandbox_id)
+                if sandbox_info and sandbox_info.status == SandboxStatus.PAUSED:
+                    await self.raise_if_sandbox_limit_reached()
+
     async def enforce_max_num_sandboxes_limit(
         self, auto_pause_existing: bool
     ) -> list[str]:

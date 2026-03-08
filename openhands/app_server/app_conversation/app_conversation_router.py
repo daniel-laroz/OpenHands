@@ -236,7 +236,13 @@ async def start_app_conversation(
     app_conversation_service: AppConversationService = (
         app_conversation_service_dependency
     ),
+    sandbox_service: SandboxService = sandbox_service_dependency,
 ) -> AppConversationStartTask:
+    await sandbox_service.validate_sandbox_limit(
+        sandbox_id=start_request.sandbox_id,
+        auto_pause_existing=start_request.auto_pause_existing,
+    )
+
     # Because we are processing after the request finishes, keep the db connection open
     set_db_session_keep_open(request.state, True)
     set_httpx_client_keep_open(request.state, True)
@@ -279,13 +285,9 @@ async def stream_app_conversation_start(
     Leaves the connection open until either the conversation starts or there was an error
     """
 
-    if not request.auto_pause_existing:
-        if not request.sandbox_id:
-            await sandbox_service.raise_if_sandbox_limit_reached()
-        else:
-            sandbox_info = await sandbox_service.get_sandbox(request.sandbox_id)
-            if sandbox_info and sandbox_info.status == SandboxStatus.PAUSED:
-                await sandbox_service.raise_if_sandbox_limit_reached()
+    await sandbox_service.validate_sandbox_limit(
+        sandbox_id=request.sandbox_id, auto_pause_existing=request.auto_pause_existing
+    )
 
     response = StreamingResponse(
         _stream_app_conversation_start(request, user_context),
