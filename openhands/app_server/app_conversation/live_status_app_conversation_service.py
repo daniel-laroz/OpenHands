@@ -226,19 +226,6 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             self._inherit_configuration_from_parent(request, parent_info)
 
         self._apply_suggested_task(request)
-
-        # When auto_pause_existing=False, check limit upfront so 429 is raised before any response
-        # (covers both creating new sandbox and resuming a paused one)
-        if not request.auto_pause_existing:
-            if not request.sandbox_id:
-                await self.sandbox_service.raise_if_sandbox_limit_reached()
-            else:
-                sandbox_info = await self.sandbox_service.get_sandbox(
-                    request.sandbox_id
-                )
-                if sandbox_info and sandbox_info.status == SandboxStatus.PAUSED:
-                    await self.sandbox_service.raise_if_sandbox_limit_reached()
-
         task = AppConversationStartTask(
             created_by_user_id=user_id,
             request=request,
