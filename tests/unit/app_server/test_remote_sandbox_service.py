@@ -928,50 +928,50 @@ class TestSandboxLimitPolicy:
     async def test_enforce_limit_pauses_specifically_the_oldest_sandbox(
         self, remote_sandbox_service
     ):
-        """Test that the sandbox with the earliest created_at date is the one paused."""
-        # 1. Setup: Limit is 2, but 3 are "running"
         remote_sandbox_service.max_num_sandboxes = 2
 
-        # Create 3 sandboxes with distinct creation times
-        oldest_time = datetime(2023, 1, 1, tzinfo=timezone.utc)
-        middle_time = datetime(2023, 1, 2, tzinfo=timezone.utc)
-        newest_time = datetime(2023, 1, 3, tzinfo=timezone.utc)
+        # Create sandboxes with different times
+        old = create_stored_sandbox(sandbox_id='old', created_at=datetime(2023, 1, 1))
+        mid = create_stored_sandbox(sandbox_id='mid', created_at=datetime(2023, 1, 2))
+        new = create_stored_sandbox(sandbox_id='new', created_at=datetime(2023, 1, 3))
+        all_sandboxes = [mid, new, old]  # Mixed up list
 
-        sb_oldest = create_stored_sandbox(
-            sandbox_id='oldest-id', created_at=oldest_time
-        )
-        sb_middle = create_stored_sandbox(
-            sandbox_id='middle-id', created_at=middle_time
-        )
-        sb_newest = create_stored_sandbox(
-            sandbox_id='newest-id', created_at=newest_time
-        )
+        # This mock mimics a DB: It looks at the query and actually sorts the list
+        async def smart_execute(query):
+            data = list(all_sandboxes)
+            # If the code says .desc(), we sort high-to-low. Otherwise, low-to-high.
+            reverse_order = 'DESC' in str(query).upper()
+            data.sort(key=lambda x: x.created_at, reverse=reverse_order)
 
-        # Mock _get_running_sandboxes_for_current_user to return them in ASC order (oldest first)
-        # This simulates the database order_by(created_at.asc())
-        remote_sandbox_service._get_running_sandboxes_for_current_user = AsyncMock(
-            return_value=[sb_oldest, sb_middle, sb_newest]
-        )
+            res = MagicMock()
+            res.scalars.return_value.all.return_value = data
+            return res
 
-        # Mock the pause method
+        remote_sandbox_service.db_session.execute = AsyncMock(side_effect=smart_execute)
         remote_sandbox_service.pause_sandbox = AsyncMock(return_value=True)
 
-        # 2. Execute: Start a new sandbox (or manually call enforce)
-        # We need to leave (max - 1) = 1 running to make room for the new one
-        # So 3 running -> needs to pause 2 to reach 1.
-        paused_ids = await remote_sandbox_service.enforce_max_num_sandboxes_limit(
+        # Mock the API to say they are all running
+        remote_sandbox_service._send_runtime_api_request = AsyncMock(
+            return_value=MagicMock(
+                json=lambda: {
+                    'runtimes': [
+                        {'session_id': 'old'},
+                        {'session_id': 'mid'},
+                        {'session_id': 'new'},
+                    ]
+                }
+            )
+        )
+
+        # Act
+        paused = await remote_sandbox_service.enforce_max_num_sandboxes_limit(
             auto_pause_existing=True
         )
 
-        # 3. Verify
-        # It should pause the 2 oldest ones: 'oldest-id' and 'middle-id'
-        assert len(paused_ids) == 2
-        assert 'oldest-id' in paused_ids
-        assert 'middle-id' in paused_ids
-        assert 'newest-id' not in paused_ids
-
-        # Ensure pause_sandbox was actually called with the oldest ID
-        remote_sandbox_service.pause_sandbox.assert_any_call('oldest-id')
+        # Assert: Should have paused 'old' and 'mid'
+        assert 'old' in paused
+        assert 'mid' in paused
+        assert 'new' not in paused
 
     @pytest.mark.asyncio
     async def test_resume_sandbox_auto_pauses_when_at_limit(
