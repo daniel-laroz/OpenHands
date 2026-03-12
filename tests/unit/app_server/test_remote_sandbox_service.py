@@ -19,7 +19,7 @@ import httpx
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.app_server.errors import SandboxError
+from openhands.app_server.errors import MaxSandboxLimitReachedError, SandboxError
 from openhands.app_server.sandbox.remote_sandbox_service import (
     ALLOW_CORS_ORIGINS_VARIABLE,
     POD_STATUS_MAPPING,
@@ -402,7 +402,9 @@ class TestSandboxLifecycle:
         mock_response = MagicMock()
         mock_response.json.return_value = create_runtime_data()
         remote_sandbox_service.httpx_client.request.return_value = mock_response
-        remote_sandbox_service.pause_old_sandboxes = AsyncMock(return_value=[])
+        remote_sandbox_service.enforce_max_num_sandboxes_limit = AsyncMock(
+            return_value=[]
+        )
 
         # Mock database operations
         remote_sandbox_service.db_session.add = MagicMock()
@@ -417,8 +419,8 @@ class TestSandboxLifecycle:
         assert (
             sandbox_info.status == SandboxStatus.STARTING
         )  # pod_status is 'pending' by default
-        remote_sandbox_service.pause_old_sandboxes.assert_called_once_with(
-            9
+        remote_sandbox_service.enforce_max_num_sandboxes_limit.assert_called_once_with(
+            True
         )  # max_num_sandboxes - 1
         remote_sandbox_service.db_session.add.assert_called_once()
         remote_sandbox_service.db_session.commit.assert_not_called()
@@ -432,7 +434,9 @@ class TestSandboxLifecycle:
         mock_response = MagicMock()
         mock_response.json.return_value = create_runtime_data()
         remote_sandbox_service.httpx_client.request.return_value = mock_response
-        remote_sandbox_service.pause_old_sandboxes = AsyncMock(return_value=[])
+        remote_sandbox_service.enforce_max_num_sandboxes_limit = AsyncMock(
+            return_value=[]
+        )
         remote_sandbox_service.db_session.add = MagicMock()
         remote_sandbox_service.db_session.commit = AsyncMock()
 
@@ -452,7 +456,9 @@ class TestSandboxLifecycle:
         """Test starting sandbox with non-existent spec."""
         # Setup
         mock_sandbox_spec_service.get_sandbox_spec.return_value = None
-        remote_sandbox_service.pause_old_sandboxes = AsyncMock(return_value=[])
+        remote_sandbox_service.enforce_max_num_sandboxes_limit = AsyncMock(
+            return_value=[]
+        )
 
         # Execute & Verify
         with pytest.raises(ValueError, match='Sandbox Spec not found'):
@@ -469,7 +475,9 @@ class TestSandboxLifecycle:
             session_id='custom_sandbox_id'
         )
         remote_sandbox_service.httpx_client.request.return_value = mock_response
-        remote_sandbox_service.pause_old_sandboxes = AsyncMock(return_value=[])
+        remote_sandbox_service.enforce_max_num_sandboxes_limit = AsyncMock(
+            return_value=[]
+        )
 
         # Mock database operations
         remote_sandbox_service.db_session.add = MagicMock()
@@ -493,7 +501,9 @@ class TestSandboxLifecycle:
         remote_sandbox_service.httpx_client.request.side_effect = httpx.HTTPError(
             'API Error'
         )
-        remote_sandbox_service.pause_old_sandboxes = AsyncMock(return_value=[])
+        remote_sandbox_service.enforce_max_num_sandboxes_limit = AsyncMock(
+            return_value=[]
+        )
         remote_sandbox_service.db_session.add = MagicMock()
         remote_sandbox_service.db_session.commit = AsyncMock()
 
@@ -510,7 +520,9 @@ class TestSandboxLifecycle:
         mock_response = MagicMock()
         mock_response.json.return_value = create_runtime_data()
         remote_sandbox_service.httpx_client.request.return_value = mock_response
-        remote_sandbox_service.pause_old_sandboxes = AsyncMock(return_value=[])
+        remote_sandbox_service.enforce_max_num_sandboxes_limit = AsyncMock(
+            return_value=[]
+        )
         remote_sandbox_service.db_session.add = MagicMock()
         remote_sandbox_service.db_session.commit = AsyncMock()
 
@@ -534,7 +546,9 @@ class TestSandboxLifecycle:
             return_value=stored_sandbox
         )
         remote_sandbox_service._get_runtime = AsyncMock(return_value=runtime_data)
-        remote_sandbox_service.pause_old_sandboxes = AsyncMock(return_value=[])
+        remote_sandbox_service.enforce_max_num_sandboxes_limit = AsyncMock(
+            return_value=[]
+        )
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -545,7 +559,9 @@ class TestSandboxLifecycle:
 
         # Verify
         assert result is True
-        remote_sandbox_service.pause_old_sandboxes.assert_called_once_with(9)
+        remote_sandbox_service.enforce_max_num_sandboxes_limit.assert_called_once_with(
+            True
+        )
         remote_sandbox_service.httpx_client.request.assert_called_once_with(
             'POST',
             'https://api.example.com/resume',
@@ -558,7 +574,9 @@ class TestSandboxLifecycle:
         """Test resuming non-existent sandbox."""
         # Setup
         remote_sandbox_service._get_stored_sandbox = AsyncMock(return_value=None)
-        remote_sandbox_service.pause_old_sandboxes = AsyncMock(return_value=[])
+        remote_sandbox_service.enforce_max_num_sandboxes_limit = AsyncMock(
+            return_value=[]
+        )
 
         # Execute
         result = await remote_sandbox_service.resume_sandbox('non-existent')
@@ -577,7 +595,9 @@ class TestSandboxLifecycle:
             return_value=stored_sandbox
         )
         remote_sandbox_service._get_runtime = AsyncMock(return_value=runtime_data)
-        remote_sandbox_service.pause_old_sandboxes = AsyncMock(return_value=[])
+        remote_sandbox_service.enforce_max_num_sandboxes_limit = AsyncMock(
+            return_value=[]
+        )
 
         mock_response = MagicMock()
         mock_response.status_code = 404
@@ -674,6 +694,375 @@ class TestSandboxLifecycle:
 
         # Verify
         assert result is True  # 404 should be ignored for delete operations
+
+
+class TestSandboxLimitPolicy:
+    """Test cases for the sandbox limit enforcement and auto_pause_existing flag."""
+
+    @pytest.mark.asyncio
+    async def test_start_sandbox_raises_429_when_limit_reached_and_auto_pause_false(
+        self, remote_sandbox_service
+    ):
+        remote_sandbox_service.max_num_sandboxes = 2
+        mock_list_response = MagicMock()
+        mock_list_response.json.return_value = {
+            'runtimes': [
+                create_runtime_data(session_id='sb-1'),
+                create_runtime_data(session_id='sb-2'),
+            ]
+        }
+
+        mock_db_result = MagicMock()
+        mock_db_result.scalars.return_value.all.return_value = [
+            create_stored_sandbox('sb-1'),
+            create_stored_sandbox('sb-2'),
+        ]
+
+        with (
+            patch.object(
+                remote_sandbox_service,
+                '_send_runtime_api_request',
+                new_callable=AsyncMock,
+            ) as mock_api,
+            patch.object(
+                remote_sandbox_service.db_session, 'execute', new_callable=AsyncMock
+            ) as mock_db,
+        ):
+            mock_api.return_value = mock_list_response
+            mock_db.return_value = mock_db_result
+
+            with pytest.raises(MaxSandboxLimitReachedError) as exc:
+                await remote_sandbox_service.start_sandbox(
+                    sandbox_spec_id='test-spec', auto_pause_existing=False
+                )
+
+            assert exc.value.status_code == 429
+
+    @pytest.mark.asyncio
+    async def test_resume_sandbox_raises_429_when_limit_reached(
+        self, remote_sandbox_service
+    ):
+        remote_sandbox_service.max_num_sandboxes = 2
+        mock_list_response = MagicMock()
+        mock_list_response.json.return_value = {
+            'runtimes': [
+                create_runtime_data(session_id='sb-1'),
+                create_runtime_data(session_id='sb-2'),
+            ]
+        }
+
+        mock_db_result = MagicMock()
+        mock_db_result.scalars.return_value.all.return_value = [
+            create_stored_sandbox('sb-1'),
+            create_stored_sandbox('sb-2'),
+        ]
+
+        remote_sandbox_service._get_stored_sandbox = AsyncMock(
+            return_value=create_stored_sandbox('sb-3')
+        )
+
+        with (
+            patch.object(
+                remote_sandbox_service,
+                '_send_runtime_api_request',
+                new_callable=AsyncMock,
+            ) as mock_api,
+            patch.object(
+                remote_sandbox_service.db_session, 'execute', new_callable=AsyncMock
+            ) as mock_db,
+        ):
+            mock_api.return_value = mock_list_response
+            mock_db.return_value = mock_db_result
+
+            with pytest.raises(MaxSandboxLimitReachedError) as exc:
+                await remote_sandbox_service.resume_sandbox(
+                    'sb-3', auto_pause_existing=False
+                )
+
+            assert exc.value.status_code == 429
+
+    @pytest.mark.parametrize('flag_value', [None, True])
+    @pytest.mark.asyncio
+    async def test_start_sandbox_enforces_pause_by_default_or_explicit_true(
+        self, remote_sandbox_service, flag_value
+    ):
+        """Regression test: Ensure auto-pausing works by default (limit of 1 boundary case)."""
+        remote_sandbox_service.max_num_sandboxes = 1
+        mock_list_response = MagicMock()
+        mock_list_response.json.return_value = {
+            'runtimes': [
+                create_runtime_data(session_id='sb-1'),
+            ]
+        }
+
+        mock_start_response = MagicMock()
+        mock_start_response.json.return_value = create_runtime_data(session_id='new-sb')
+
+        mock_db_result = MagicMock()
+        mock_db_result.scalars.return_value.all.return_value = [
+            create_stored_sandbox('sb-1'),
+        ]
+
+        with (
+            patch.object(
+                remote_sandbox_service,
+                '_send_runtime_api_request',
+                new_callable=AsyncMock,
+            ) as mock_api,
+            patch.object(
+                remote_sandbox_service.db_session, 'execute', new_callable=AsyncMock
+            ) as mock_db,
+            patch.object(
+                remote_sandbox_service, 'pause_sandbox', new_callable=AsyncMock
+            ) as mock_pause,
+        ):
+            mock_api.side_effect = [mock_list_response, mock_start_response]
+            mock_db.return_value = mock_db_result
+            mock_pause.return_value = True
+
+            if flag_value is None:
+                await remote_sandbox_service.start_sandbox(sandbox_spec_id='test-spec')
+            else:
+                await remote_sandbox_service.start_sandbox(
+                    sandbox_spec_id='test-spec', auto_pause_existing=flag_value
+                )
+
+            assert mock_pause.called
+            mock_pause.assert_called_with('sb-1')
+
+    @pytest.mark.asyncio
+    async def test_enforce_limit_under_limit(self, remote_sandbox_service):
+        """Test enforce limits does nothing when under the limit."""
+        # Arrange: 5 running, limit is 10
+        remote_sandbox_service._get_running_sandboxes_for_current_user = AsyncMock(
+            return_value=[StoredRemoteSandbox() for _ in range(5)]
+        )
+
+        # Act
+        result = await remote_sandbox_service.enforce_max_num_sandboxes_limit(
+            auto_pause_existing=True
+        )
+
+        # Assert: No sandboxes were paused
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_enforce_limit_auto_pause_false_raises_error(
+        self, remote_sandbox_service
+    ):
+        """Test enforce limits raises 429 when at limit and auto_pause=False."""
+        # Arrange: 10 running, limit is 10
+        remote_sandbox_service._get_running_sandboxes_for_current_user = AsyncMock(
+            return_value=[StoredRemoteSandbox() for _ in range(10)]
+        )
+
+        # Act & Assert
+        with pytest.raises(MaxSandboxLimitReachedError):
+            await remote_sandbox_service.enforce_max_num_sandboxes_limit(
+                auto_pause_existing=False
+            )
+
+    @pytest.mark.asyncio
+    async def test_enforce_limit_auto_pause_true_pauses_old(
+        self, remote_sandbox_service
+    ):
+        """Test enforce limits pauses old sandboxes when at limit and auto_pause=True."""
+
+        remote_sandbox_service.max_num_sandboxes = 10
+
+        # Arrange: 11 running, limit is 10
+        running_sandboxes = [StoredRemoteSandbox(id=f'sb-{i}') for i in range(11)]
+        remote_sandbox_service._get_running_sandboxes_for_current_user = AsyncMock(
+            return_value=running_sandboxes
+        )
+
+        # We expect it to pause enough to leave max_num_sandboxes - 1 (which is 9) running.
+        # Since we have 11 running, it should pause 2 sandboxes.
+        remote_sandbox_service.batch_pause_sandboxes = AsyncMock(
+            return_value=['sb-0', 'sb-1']
+        )
+
+        # Act
+        paused = await remote_sandbox_service.enforce_max_num_sandboxes_limit(
+            auto_pause_existing=True
+        )
+
+        # Assert
+        assert paused == ['sb-0', 'sb-1']
+        remote_sandbox_service.batch_pause_sandboxes.assert_called_once_with(
+            sandboxes_to_pause=running_sandboxes[:2]
+        )
+
+    @pytest.mark.asyncio
+    async def test_enforce_limit_pauses_specifically_the_oldest_sandbox(
+        self, remote_sandbox_service
+    ):
+        remote_sandbox_service.max_num_sandboxes = 2
+
+        # Create sandboxes with different times
+        old = create_stored_sandbox(sandbox_id='old', created_at=datetime(2023, 1, 1))
+        mid = create_stored_sandbox(sandbox_id='mid', created_at=datetime(2023, 1, 2))
+        new = create_stored_sandbox(sandbox_id='new', created_at=datetime(2023, 1, 3))
+        all_sandboxes = [mid, new, old]  # Mixed up list
+
+        # This mock mimics a DB: It looks at the query and actually sorts the list
+        async def smart_execute(query):
+            data = list(all_sandboxes)
+            # If the code says .desc(), we sort high-to-low. Otherwise, low-to-high.
+            reverse_order = 'DESC' in str(query).upper()
+            data.sort(key=lambda x: x.created_at, reverse=reverse_order)
+
+            res = MagicMock()
+            res.scalars.return_value.all.return_value = data
+            return res
+
+        remote_sandbox_service.db_session.execute = AsyncMock(side_effect=smart_execute)
+        remote_sandbox_service.pause_sandbox = AsyncMock(return_value=True)
+
+        # Mock the API to say they are all running
+        remote_sandbox_service._send_runtime_api_request = AsyncMock(
+            return_value=MagicMock(
+                json=lambda: {
+                    'runtimes': [
+                        {'session_id': 'old'},
+                        {'session_id': 'mid'},
+                        {'session_id': 'new'},
+                    ]
+                }
+            )
+        )
+
+        # Act
+        paused = await remote_sandbox_service.enforce_max_num_sandboxes_limit(
+            auto_pause_existing=True
+        )
+
+        # Assert: Should have paused 'old' and 'mid'
+        assert 'old' in paused
+        assert 'mid' in paused
+        assert 'new' not in paused
+
+    @pytest.mark.asyncio
+    async def test_resume_sandbox_auto_pauses_when_at_limit(
+        self, remote_sandbox_service
+    ):
+        """Verify resume_sandbox successfully pauses an old sandbox to make room."""
+        # Setup: Limit is 1, and 'sb-running' is currently taking that slot
+        remote_sandbox_service.max_num_sandboxes = 1
+        sb_running = create_stored_sandbox(
+            sandbox_id='sb-running', created_at=datetime(2020, 1, 1)
+        )
+        sb_to_resume = create_stored_sandbox(
+            sandbox_id='sb-to-resume', created_at=datetime(2021, 1, 1)
+        )
+
+        # Mock the state: sb-running is in the remote 'list'
+        remote_sandbox_service._get_running_sandboxes_for_current_user = AsyncMock(
+            return_value=[sb_running]
+        )
+        remote_sandbox_service._get_stored_sandbox = AsyncMock(
+            return_value=sb_to_resume
+        )
+        remote_sandbox_service._get_runtime = AsyncMock(
+            return_value={'runtime_id': 'r-123'}
+        )
+
+        # Mock the actions
+        remote_sandbox_service.pause_sandbox = AsyncMock(return_value=True)
+        mock_response = MagicMock(status_code=200)
+        remote_sandbox_service.httpx_client.request = AsyncMock(
+            return_value=mock_response
+        )
+
+        # Execute: Try to resume while at limit with auto_pause=True
+        success = await remote_sandbox_service.resume_sandbox(
+            'sb-to-resume', auto_pause_existing=True
+        )
+
+        # Assert
+        assert success is True
+        # THIS IS THE KEY: It should have called pause on the running one
+        remote_sandbox_service.pause_sandbox.assert_called_once_with('sb-running')
+        # And then called the resume API for the target
+        assert remote_sandbox_service.httpx_client.request.call_args_list[-1][0][
+            1
+        ].endswith('/resume')
+
+    @pytest.mark.asyncio
+    async def test_validate_sandbox_limit_new_sandbox_at_limit(
+        self, remote_sandbox_service
+    ):
+        """Test validation for a new sandbox (no ID) when at limit raises 429."""
+        remote_sandbox_service.max_num_sandboxes = 1
+        remote_sandbox_service.get_sandbox = AsyncMock()  # Not called for new sb
+
+        # Mock 1 running sandbox (we are at limit)
+        remote_sandbox_service._get_running_sandboxes_for_current_user = AsyncMock(
+            return_value=[create_stored_sandbox('sb-1')]
+        )
+
+        with pytest.raises(MaxSandboxLimitReachedError) as exc:
+            await remote_sandbox_service.validate_sandbox_limit(
+                sandbox_id=None, auto_pause_existing=False
+            )
+        assert exc.value.status_code == 429
+
+    @pytest.mark.asyncio
+    async def test_validate_sandbox_limit_paused_sandbox_at_limit(
+        self, remote_sandbox_service
+    ):
+        """Test that resuming a PAUSED sandbox is blocked when at limit."""
+        remote_sandbox_service.max_num_sandboxes = 1
+        sandbox_id = 'paused-sb'
+
+        # Mock status as PAUSED
+        remote_sandbox_service.get_sandbox = AsyncMock(
+            return_value=MagicMock(status=SandboxStatus.PAUSED)
+        )
+        # Mock another sandbox already taking the slot
+        remote_sandbox_service._get_running_sandboxes_for_current_user = AsyncMock(
+            return_value=[create_stored_sandbox('sb-active')]
+        )
+
+        with pytest.raises(MaxSandboxLimitReachedError):
+            await remote_sandbox_service.validate_sandbox_limit(
+                sandbox_id=sandbox_id, auto_pause_existing=False
+            )
+
+    @pytest.mark.asyncio
+    async def test_validate_sandbox_limit_running_sandbox_bypass(
+        self, remote_sandbox_service
+    ):
+        """Test that a RUNNING sandbox bypasses limit checks entirely."""
+        remote_sandbox_service.max_num_sandboxes = 1
+        sandbox_id = 'already-running'
+
+        remote_sandbox_service.get_sandbox = AsyncMock(
+            return_value=MagicMock(status=SandboxStatus.RUNNING)
+        )
+        remote_sandbox_service._get_running_sandboxes_for_current_user = AsyncMock()
+
+        # Should pass without calling the expensive 'list' operation
+        await remote_sandbox_service.validate_sandbox_limit(
+            sandbox_id=sandbox_id, auto_pause_existing=False
+        )
+        remote_sandbox_service._get_running_sandboxes_for_current_user.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_validate_sandbox_limit_missing_info_defaults_to_check(
+        self, remote_sandbox_service
+    ):
+        """Safety Test: If sandbox_info is missing, we must check the limit (Defensive)."""
+        remote_sandbox_service.max_num_sandboxes = 1
+        remote_sandbox_service.get_sandbox = AsyncMock(return_value=None)
+        remote_sandbox_service._get_running_sandboxes_for_current_user = AsyncMock(
+            return_value=[create_stored_sandbox('sb-active')]
+        )
+
+        with pytest.raises(MaxSandboxLimitReachedError):
+            await remote_sandbox_service.validate_sandbox_limit(
+                sandbox_id='missing-id', auto_pause_existing=False
+            )
 
 
 class TestSandboxSearch:
@@ -940,7 +1329,9 @@ class TestErrorHandling:
             return_value=stored_sandbox
         )
         remote_sandbox_service._get_runtime = AsyncMock(return_value=runtime_data)
-        remote_sandbox_service.pause_old_sandboxes = AsyncMock(return_value=[])
+        remote_sandbox_service.enforce_max_num_sandboxes_limit = AsyncMock(
+            return_value=[]
+        )
         remote_sandbox_service.httpx_client.request.side_effect = httpx.HTTPError(
             'API Error'
         )

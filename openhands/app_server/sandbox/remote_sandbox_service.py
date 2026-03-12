@@ -22,7 +22,7 @@ from openhands.app_server.app_conversation.app_conversation_info_service import 
 from openhands.app_server.app_conversation.app_conversation_models import (
     AppConversationInfo,
 )
-from openhands.app_server.errors import SandboxError
+from openhands.app_server.errors import MaxSandboxLimitReachedError, SandboxError
 from openhands.app_server.event.event_service import EventService
 from openhands.app_server.event_callback.event_callback_service import (
     EventCallbackService,
@@ -442,12 +442,15 @@ class RemoteSandboxService(SandboxService):
         return await self._get_sandbox_by_session_api_key_legacy(session_api_key)
 
     async def start_sandbox(
-        self, sandbox_spec_id: str | None = None, sandbox_id: str | None = None
+        self,
+        sandbox_spec_id: str | None = None,
+        sandbox_id: str | None = None,
+        auto_pause_existing: bool = True,
     ) -> SandboxInfo:
         """Start a new sandbox by creating a remote runtime."""
         try:
-            # Enforce sandbox limits by cleaning up old sandboxes
-            await self.pause_old_sandboxes(self.max_num_sandboxes - 1)
+            # Enforce sandbox limits by cleaning up old sandboxes or returning 429 before pausing
+            await self.enforce_max_num_sandboxes_limit(auto_pause_existing)
 
             # Get sandbox spec
             if sandbox_spec_id is None:
@@ -523,14 +526,22 @@ class RemoteSandboxService(SandboxService):
 
             return self._to_sandbox_info(stored_sandbox, runtime_data)
 
+        except MaxSandboxLimitReachedError:
+            _logger.warning(
+                f'Error starting sandbox. User reached sandbox limit ({self.max_num_sandboxes}). '
+                'Request rejected because auto_pause_existing is False.'
+            )
+            raise
         except httpx.HTTPError as e:
             _logger.error(f'Failed to start sandbox: {e}')
             raise SandboxError(f'Failed to start sandbox: {e}')
 
-    async def resume_sandbox(self, sandbox_id: str) -> bool:
+    async def resume_sandbox(
+        self, sandbox_id: str, auto_pause_existing: bool = True
+    ) -> bool:
         """Resume a paused sandbox."""
         # Enforce sandbox limits by cleaning up old sandboxes
-        await self.pause_old_sandboxes(self.max_num_sandboxes - 1)
+        await self.enforce_max_num_sandboxes_limit(auto_pause_existing)
 
         try:
             if not await self._get_stored_sandbox(sandbox_id):
@@ -545,6 +556,12 @@ class RemoteSandboxService(SandboxService):
                 return False
             response.raise_for_status()
             return True
+        except MaxSandboxLimitReachedError:
+            _logger.warning(
+                f'Error resuming sandbox {sandbox_id}. User reached sandbox limit ({self.max_num_sandboxes}). '
+                'Request rejected because auto_pause_existing is False.'
+            )
+            raise
         except httpx.HTTPError as e:
             _logger.error(f'Error resuming sandbox {sandbox_id}: {e}')
             return False
@@ -589,18 +606,14 @@ class RemoteSandboxService(SandboxService):
             _logger.error(f'Error deleting sandbox {sandbox_id}: {e}')
             return False
 
-    async def pause_old_sandboxes(self, max_num_sandboxes: int) -> list[str]:
-        """Pause the oldest sandboxes if there are more than max_num_sandboxes running.
-        In a multi user environment, this will pause sandboxes only for the current user.
-
-        Args:
-            max_num_sandboxes: Maximum number of sandboxes to keep running
-
-        Returns:
-            List of sandbox IDs that were paused
+    async def _get_running_sandboxes_for_current_user(
+        self,
+    ) -> list[StoredRemoteSandbox]:
         """
-        if max_num_sandboxes <= 0:
-            raise ValueError('max_num_sandboxes must be greater than 0')
+        Retrieves all currently running sandboxes for the authenticated user.
+
+        The returned list is sorted by 'created_at' in ascending order (Oldest First).
+        """
 
         response = await self._send_runtime_api_request(
             'GET',
@@ -613,19 +626,16 @@ class RemoteSandboxService(SandboxService):
 
         query = await self._secure_select()
         query = query.filter(StoredRemoteSandbox.id.in_(running_session_ids)).order_by(
-            StoredRemoteSandbox.created_at.desc()
+            StoredRemoteSandbox.created_at.asc()
         )
-        running_sandboxes = list(await self.db_session.execute(query))
 
-        # If we're within the limit, no cleanup needed
-        if len(running_sandboxes) <= max_num_sandboxes:
-            return []
+        result = await self.db_session.execute(query)
+        running_sandboxes = list(result.scalars().all())
+        return running_sandboxes
 
-        # Determine how many to pause
-        num_to_pause = len(running_sandboxes) - max_num_sandboxes
-        sandboxes_to_pause = running_sandboxes[:num_to_pause]
-
-        # Stop the oldest sandboxes
+    async def batch_pause_sandboxes(
+        self, sandboxes_to_pause: list[StoredRemoteSandbox]
+    ) -> list[str]:
         paused_sandbox_ids = []
         for sandbox in sandboxes_to_pause:
             try:
@@ -637,6 +647,82 @@ class RemoteSandboxService(SandboxService):
                 pass
 
         return paused_sandbox_ids
+
+    async def validate_sandbox_limit(
+        self, sandbox_id: str | None = None, auto_pause_existing: bool = True
+    ) -> None:
+        if auto_pause_existing:
+            return
+
+        check_limit_for_resume = False
+        if sandbox_id:
+            sandbox_info = await self.get_sandbox(sandbox_id)
+            check_limit_for_resume = (not sandbox_info) or (
+                sandbox_info.status == SandboxStatus.PAUSED
+            )
+
+        if (not sandbox_id) or check_limit_for_resume:
+            if self.max_num_sandboxes < 1:
+                raise ValueError('Maximum number of sandboxes must be greater than 0')
+
+            running_sandboxes = await self._get_running_sandboxes_for_current_user()
+            num_running = len(running_sandboxes)
+
+            if num_running >= self.max_num_sandboxes:
+                raise MaxSandboxLimitReachedError(
+                    detail=(
+                        'You have reached the maximum number of running sandboxes '
+                        f'(current={num_running}, limit={self.max_num_sandboxes}). '
+                        'Stop or pause an existing sandbox and retry, or call again with '
+                        'auto_pause_existing=true to allow automatically pausing older sandboxes/conversations.'
+                    )
+                )
+
+    async def enforce_max_num_sandboxes_limit(
+        self, auto_pause_existing: bool
+    ) -> list[str]:
+        """If auto_pause_existing, pause the oldest sandboxes if there are more than max_num_sandboxes_to_keep_running running.
+        In a multi user environment, this will pause sandboxes only for the current user. else return 429."""
+
+        if self.max_num_sandboxes < 1:
+            raise ValueError('Maximum number of sandboxes must be greater than 0')
+
+        running_sandboxes = await self._get_running_sandboxes_for_current_user()
+        num_running = len(running_sandboxes)
+
+        if num_running < self.max_num_sandboxes:
+            return []
+
+        if not auto_pause_existing:
+            raise MaxSandboxLimitReachedError(
+                detail=(
+                    'You have reached the maximum number of running sandboxes '
+                    f'(current={num_running}, limit={self.max_num_sandboxes}). '
+                    'Stop or pause an existing sandbox and retry, or call again with '
+                    'auto_pause_existing=true to allow automatically pausing older sandboxes/conversations.'
+                )
+            )
+
+        num_to_pause = len(running_sandboxes) - (self.max_num_sandboxes - 1)
+        sandboxes_to_pause = running_sandboxes[:num_to_pause]
+
+        # Stop the oldest sandboxes
+        paused_sandbox_ids = await self.batch_pause_sandboxes(
+            sandboxes_to_pause=sandboxes_to_pause
+        )
+
+        return paused_sandbox_ids
+
+    async def pause_old_sandboxes(self, max_num_sandboxes: int) -> list[str]:
+        """
+        Implementation of the SandboxService abstract method.
+
+        NOTE: This is a legacy bridge. 'enforce_max_num_sandboxes_limit' is the
+        primary entry point for limit management in the Remote implementation
+        as it handles the opt-out (429) logic.
+        """
+        # We ignore the passed max_num_sandboxes as enforce_max_num_sandboxes_limit uses self.max_num_sandboxes
+        return await self.enforce_max_num_sandboxes_limit(auto_pause_existing=True)
 
     async def batch_get_sandboxes(
         self, sandbox_ids: list[str]

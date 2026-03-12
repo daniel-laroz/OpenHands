@@ -327,7 +327,10 @@ class DockerSandboxService(SandboxService):
             return None
 
     async def start_sandbox(
-        self, sandbox_spec_id: str | None = None, sandbox_id: str | None = None
+        self,
+        sandbox_spec_id: str | None = None,
+        sandbox_id: str | None = None,
+        auto_pause_existing: bool = True,
     ) -> SandboxInfo:
         """Start a new sandbox."""
         # Warn about port collision risk when using host network mode with multiple sandboxes
@@ -442,7 +445,9 @@ class DockerSandboxService(SandboxService):
         except APIError as e:
             raise SandboxError(f'Failed to start container: {e}')
 
-    async def resume_sandbox(self, sandbox_id: str) -> bool:
+    async def resume_sandbox(
+        self, sandbox_id: str, auto_pause_existing: bool = True
+    ) -> bool:
         """Resume a paused sandbox."""
         # Enforce sandbox limits by cleaning up old sandboxes
         await self.pause_old_sandboxes(self.max_num_sandboxes - 1)

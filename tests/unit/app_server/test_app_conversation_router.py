@@ -4,18 +4,21 @@ This module tests the batch_get_app_conversations endpoint,
 focusing on UUID string parsing, validation, and error handling.
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException, status
+from fastapi import HTTPException, Request, status
 
 from openhands.app_server.app_conversation.app_conversation_models import (
     AppConversation,
 )
 from openhands.app_server.app_conversation.app_conversation_router import (
     batch_get_app_conversations,
+    start_app_conversation,
+    stream_app_conversation_start,
 )
+from openhands.app_server.errors import MaxSandboxLimitReachedError
 from openhands.app_server.sandbox.sandbox_models import SandboxStatus
 
 
@@ -207,3 +210,99 @@ class TestBatchGetAppConversations:
         assert result[0] is not None
         assert result[0].id == uuid1
         assert result[1] is None
+
+
+@pytest.mark.asyncio
+class TestStartAppConversation:
+    """Test suite for start_app_conversation endpoint."""
+
+    async def test_returns_429_when_limit_reached(self):
+        """Test that reaching the sandbox limit raises a 429 error.
+
+        Arrange: Mock sandbox_service to raise MaxSandboxLimitReachedError
+        Act: Call start_app_conversation
+        Assert: The error is raised before any heavy processing starts
+        """
+        # Arrange
+        mock_request = MagicMock(spec=Request)
+        mock_request.state = MagicMock()
+
+        mock_start_request = MagicMock()
+        mock_start_request.auto_pause_existing = False
+        mock_start_request.sandbox_id = None
+
+        # The core change: Sandbox service is now the one failing the request
+        mock_sandbox_service = AsyncMock()
+        mock_sandbox_service.validate_sandbox_limit.side_effect = (
+            MaxSandboxLimitReachedError(
+                detail='You have reached the maximum number of running sandboxes'
+            )
+        )
+
+        mock_db_session = AsyncMock()
+        mock_httpx_client = AsyncMock()
+        mock_service = MagicMock()
+
+        # Act & Assert
+        with pytest.raises(MaxSandboxLimitReachedError) as exc_info:
+            await start_app_conversation(
+                request=mock_request,
+                start_request=mock_start_request,
+                db_session=mock_db_session,
+                httpx_client=mock_httpx_client,
+                app_conversation_service=mock_service,
+                sandbox_service=mock_sandbox_service,  # Injected manually
+            )
+
+        assert exc_info.value.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+        assert 'maximum number of running sandboxes' in exc_info.value.detail
+        # Verify the validation was actually called
+        mock_sandbox_service.validate_sandbox_limit.assert_called_once()
+
+
+@pytest.mark.asyncio
+class TestStreamAppConversationStart:
+    """Test suite for stream_app_conversation_start endpoint."""
+
+    @patch(
+        'openhands.app_server.app_conversation.app_conversation_router.get_app_conversation_service'
+    )
+    async def test_returns_429_when_limit_reached(self, mock_get_service):
+        """Test that the streaming endpoint raises a 429 before the stream starts.
+
+        Arrange: Mock sandbox_service to raise MaxSandboxLimitReachedError
+        Act: Call stream_app_conversation_start
+        Assert: The error is raised immediately (Admission Control)
+        """
+        # Arrange
+        mock_start_request = MagicMock()
+        mock_start_request.auto_pause_existing = False
+        mock_start_request.sandbox_id = 'test-id'
+        mock_user_context = MagicMock()
+
+        # Configure the mock sandbox service to fail validation
+        mock_sandbox_service = AsyncMock()
+        mock_sandbox_service.validate_sandbox_limit.side_effect = (
+            MaxSandboxLimitReachedError(
+                detail='You have reached the maximum number of running sandboxes'
+            )
+        )
+
+        # Service shouldn't even be reached in this scenario
+        mock_service = MagicMock()
+        mock_context_manager = AsyncMock()
+        mock_context_manager.__aenter__.return_value = mock_service
+        mock_get_service.return_value = mock_context_manager
+
+        # Act & Assert
+        # Note: We don't iterate here because the error happens BEFORE the stream is returned
+        with pytest.raises(MaxSandboxLimitReachedError) as exc_info:
+            await stream_app_conversation_start(
+                request=mock_start_request,
+                user_context=mock_user_context,
+                sandbox_service=mock_sandbox_service,
+            )
+
+        assert exc_info.value.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+        assert 'maximum number of running sandboxes' in exc_info.value.detail
+        mock_sandbox_service.validate_sandbox_limit.assert_called_once()

@@ -227,7 +227,6 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             self._inherit_configuration_from_parent(request, parent_info)
 
         self._apply_suggested_task(request)
-
         task = AppConversationStartTask(
             created_by_user_id=user_id,
             request=request,
@@ -504,7 +503,8 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 else None
             )
             sandbox = await self.sandbox_service.start_sandbox(
-                sandbox_id=sandbox_id_str
+                sandbox_id=sandbox_id_str,
+                auto_pause_existing=task.request.auto_pause_existing,
             )
             task.sandbox_id = sandbox.id
         else:

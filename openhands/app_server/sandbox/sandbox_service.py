@@ -58,7 +58,10 @@ class SandboxService(ABC):
 
     @abstractmethod
     async def start_sandbox(
-        self, sandbox_spec_id: str | None = None, sandbox_id: str | None = None
+        self,
+        sandbox_spec_id: str | None = None,
+        sandbox_id: str | None = None,
+        auto_pause_existing: bool = True,
     ) -> SandboxInfo:
         """Begin the process of starting a sandbox.
 
@@ -68,12 +71,21 @@ class SandboxService(ABC):
         """
 
     @abstractmethod
-    async def resume_sandbox(self, sandbox_id: str) -> bool:
+    async def resume_sandbox(
+        self, sandbox_id: str, auto_pause_existing: bool = True
+    ) -> bool:
         """Begin the process of resuming a sandbox.
 
         Return True if the sandbox exists and is being resumed or is already running.
         Return False if the sandbox did not exist.
         """
+
+    async def validate_sandbox_limit(
+        self, sandbox_id: str | None = None, auto_pause_existing: bool = True
+    ) -> None:
+        """Raise 429 if at sandbox limit. Override in RemoteSandboxService when auto_pause_existing=False.
+        No-op for other implementations."""
+        return
 
     async def wait_for_sandbox_running(
         self,

@@ -287,7 +287,10 @@ class ProcessSandboxService(SandboxService):
         return None
 
     async def start_sandbox(
-        self, sandbox_spec_id: str | None = None, sandbox_id: str | None = None
+        self,
+        sandbox_spec_id: str | None = None,
+        sandbox_id: str | None = None,
+        auto_pause_existing: bool = True,
     ) -> SandboxInfo:
         """Start a new sandbox."""
         # Get sandbox spec
@@ -342,7 +345,9 @@ class ProcessSandboxService(SandboxService):
 
         return await self._process_to_sandbox_info(sandbox_id, process_info)
 
-    async def resume_sandbox(self, sandbox_id: str) -> bool:
+    async def resume_sandbox(
+        self, sandbox_id: str, auto_pause_existing: bool = True
+    ) -> bool:
         """Resume a paused sandbox."""
         process_info = _processes.get(sandbox_id)
         if process_info is None:
