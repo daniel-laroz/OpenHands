@@ -831,39 +831,6 @@ class TestSandboxLimitPolicy:
             mock_pause.assert_called_with('sb-1')
 
     @pytest.mark.asyncio
-    async def test_raise_if_sandbox_limit_reached_under_limit(
-        self, remote_sandbox_service
-    ):
-        """Test that no error is raised when under the limit."""
-        # Arrange: 5 running, limit is 10
-        remote_sandbox_service._get_running_sandboxes_for_current_user = AsyncMock(
-            return_value=[StoredRemoteSandbox() for _ in range(5)]
-        )
-
-        # Act & Assert: Should pass quietly
-        await remote_sandbox_service.raise_if_sandbox_limit_reached()
-        remote_sandbox_service._get_running_sandboxes_for_current_user.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_raise_if_sandbox_limit_reached_at_limit(
-        self, remote_sandbox_service
-    ):
-        """Test that 429 is raised when at or over the limit."""
-        # Arrange: 10 running, limit is 10
-        remote_sandbox_service._get_running_sandboxes_for_current_user = AsyncMock(
-            return_value=[StoredRemoteSandbox() for _ in range(10)]
-        )
-
-        # Act & Assert
-        with pytest.raises(MaxSandboxLimitReachedError) as exc:
-            await remote_sandbox_service.raise_if_sandbox_limit_reached()
-
-        assert (
-            'You have reached the maximum number of running sandboxes'
-            in exc.value.detail
-        )
-
-    @pytest.mark.asyncio
     async def test_enforce_limit_under_limit(self, remote_sandbox_service):
         """Test enforce limits does nothing when under the limit."""
         # Arrange: 5 running, limit is 10
@@ -900,16 +867,19 @@ class TestSandboxLimitPolicy:
         self, remote_sandbox_service
     ):
         """Test enforce limits pauses old sandboxes when at limit and auto_pause=True."""
+
+        remote_sandbox_service.max_num_sandboxes = 10
+
         # Arrange: 11 running, limit is 10
-        running_sandboxes = [StoredRemoteSandbox() for _ in range(11)]
+        running_sandboxes = [StoredRemoteSandbox(id=f'sb-{i}') for i in range(11)]
         remote_sandbox_service._get_running_sandboxes_for_current_user = AsyncMock(
             return_value=running_sandboxes
         )
 
         # We expect it to pause enough to leave max_num_sandboxes - 1 (which is 9) running.
         # Since we have 11 running, it should pause 2 sandboxes.
-        remote_sandbox_service._pause_old_sandboxes = AsyncMock(
-            return_value=['sandbox-1', 'sandbox-2']
+        remote_sandbox_service.batch_pause_sandboxes = AsyncMock(
+            return_value=['sb-0', 'sb-1']
         )
 
         # Act
@@ -918,10 +888,9 @@ class TestSandboxLimitPolicy:
         )
 
         # Assert
-        assert paused == ['sandbox-1', 'sandbox-2']
-        remote_sandbox_service._pause_old_sandboxes.assert_called_once_with(
-            max_num_sandboxes_to_keep_running=9,  # limit (10) - 1
-            running_sandboxes=running_sandboxes,
+        assert paused == ['sb-0', 'sb-1']
+        remote_sandbox_service.batch_pause_sandboxes.assert_called_once_with(
+            sandboxes_to_pause=running_sandboxes[:2]
         )
 
     @pytest.mark.asyncio
@@ -1023,78 +992,77 @@ class TestSandboxLimitPolicy:
     async def test_validate_sandbox_limit_new_sandbox_at_limit(
         self, remote_sandbox_service
     ):
-        """Test validation for a new sandbox (no ID) when at limit."""
-        # Arrange: Mock the internal limit check to raise 429
-        remote_sandbox_service.raise_if_sandbox_limit_reached = AsyncMock(
-            side_effect=MaxSandboxLimitReachedError('Limit reached')
+        """Test validation for a new sandbox (no ID) when at limit raises 429."""
+        remote_sandbox_service.max_num_sandboxes = 1
+        remote_sandbox_service.get_sandbox = AsyncMock()  # Not called for new sb
+
+        # Mock 1 running sandbox (we are at limit)
+        remote_sandbox_service._get_running_sandboxes_for_current_user = AsyncMock(
+            return_value=[create_stored_sandbox('sb-1')]
         )
 
-        # Act & Assert: Should raise 429 for a NEW sandbox (sandbox_id=None)
-        with pytest.raises(MaxSandboxLimitReachedError):
+        with pytest.raises(MaxSandboxLimitReachedError) as exc:
             await remote_sandbox_service.validate_sandbox_limit(
                 sandbox_id=None, auto_pause_existing=False
             )
-
-        remote_sandbox_service.raise_if_sandbox_limit_reached.assert_called_once()
+        assert exc.value.status_code == 429
 
     @pytest.mark.asyncio
     async def test_validate_sandbox_limit_paused_sandbox_at_limit(
         self, remote_sandbox_service
     ):
-        """Test validation for a PAUSED sandbox when at limit."""
-        # Arrange
+        """Test that resuming a PAUSED sandbox is blocked when at limit."""
+        remote_sandbox_service.max_num_sandboxes = 1
         sandbox_id = 'paused-sb'
-        # Mock sandbox to be PAUSED
+
+        # Mock status as PAUSED
         remote_sandbox_service.get_sandbox = AsyncMock(
             return_value=MagicMock(status=SandboxStatus.PAUSED)
         )
-        remote_sandbox_service.raise_if_sandbox_limit_reached = AsyncMock(
-            side_effect=MaxSandboxLimitReachedError('Limit reached')
+        # Mock another sandbox already taking the slot
+        remote_sandbox_service._get_running_sandboxes_for_current_user = AsyncMock(
+            return_value=[create_stored_sandbox('sb-active')]
         )
 
-        # Act & Assert: Resuming a paused sandbox counts as a "new" slot
         with pytest.raises(MaxSandboxLimitReachedError):
             await remote_sandbox_service.validate_sandbox_limit(
                 sandbox_id=sandbox_id, auto_pause_existing=False
             )
 
-        remote_sandbox_service.raise_if_sandbox_limit_reached.assert_called_once()
-
     @pytest.mark.asyncio
     async def test_validate_sandbox_limit_running_sandbox_bypass(
         self, remote_sandbox_service
     ):
-        """Test that a RUNNING sandbox bypasses limit checks."""
-        # Arrange
-        sandbox_id = 'running-sb'
-        # Mock sandbox to be already RUNNING
+        """Test that a RUNNING sandbox bypasses limit checks entirely."""
+        remote_sandbox_service.max_num_sandboxes = 1
+        sandbox_id = 'already-running'
+
         remote_sandbox_service.get_sandbox = AsyncMock(
             return_value=MagicMock(status=SandboxStatus.RUNNING)
         )
-        remote_sandbox_service.raise_if_sandbox_limit_reached = AsyncMock()
+        remote_sandbox_service._get_running_sandboxes_for_current_user = AsyncMock()
 
-        # Act: Attaching to a running sandbox shouldn't trigger limit checks
+        # Should pass without calling the expensive 'list' operation
         await remote_sandbox_service.validate_sandbox_limit(
             sandbox_id=sandbox_id, auto_pause_existing=False
         )
-
-        # Assert: raise_if_sandbox_limit_reached should NOT be called
-        remote_sandbox_service.raise_if_sandbox_limit_reached.assert_not_called()
+        remote_sandbox_service._get_running_sandboxes_for_current_user.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_validate_sandbox_limit_auto_pause_bypass(
+    async def test_validate_sandbox_limit_missing_info_defaults_to_check(
         self, remote_sandbox_service
     ):
-        """Test that auto_pause_existing=True skips the upfront validation."""
-        remote_sandbox_service.raise_if_sandbox_limit_reached = AsyncMock()
-
-        # Act: When auto_pause is True, we don't raise 429 upfront
-        await remote_sandbox_service.validate_sandbox_limit(
-            sandbox_id=None, auto_pause_existing=True
+        """Safety Test: If sandbox_info is missing, we must check the limit (Defensive)."""
+        remote_sandbox_service.max_num_sandboxes = 1
+        remote_sandbox_service.get_sandbox = AsyncMock(return_value=None)
+        remote_sandbox_service._get_running_sandboxes_for_current_user = AsyncMock(
+            return_value=[create_stored_sandbox('sb-active')]
         )
 
-        # Assert: No error was raised
-        remote_sandbox_service.raise_if_sandbox_limit_reached.assert_not_called()
+        with pytest.raises(MaxSandboxLimitReachedError):
+            await remote_sandbox_service.validate_sandbox_limit(
+                sandbox_id='missing-id', auto_pause_existing=False
+            )
 
 
 class TestSandboxSearch:

@@ -609,6 +609,12 @@ class RemoteSandboxService(SandboxService):
     async def _get_running_sandboxes_for_current_user(
         self,
     ) -> list[StoredRemoteSandbox]:
+        """
+        Retrieves all currently running sandboxes for the authenticated user.
+
+        The returned list is sorted by 'created_at' in ascending order (Oldest First).
+        """
+
         response = await self._send_runtime_api_request(
             'GET',
             '/list',
@@ -627,15 +633,9 @@ class RemoteSandboxService(SandboxService):
         running_sandboxes = list(result.scalars().all())
         return running_sandboxes
 
-    async def _pause_old_sandboxes(
-        self,
-        max_num_sandboxes_to_keep_running: int,
-        running_sandboxes: list[StoredRemoteSandbox],
+    async def batch_pause_sandboxes(
+        self, sandboxes_to_pause: list[StoredRemoteSandbox]
     ) -> list[str]:
-        num_to_pause = len(running_sandboxes) - max_num_sandboxes_to_keep_running
-        sandboxes_to_pause = running_sandboxes[:num_to_pause]
-
-        # Stop the oldest sandboxes
         paused_sandbox_ids = []
         for sandbox in sandboxes_to_pause:
             try:
@@ -648,58 +648,35 @@ class RemoteSandboxService(SandboxService):
 
         return paused_sandbox_ids
 
-    async def pause_old_sandboxes(self, max_num_sandboxes: int) -> list[str]:
-        """Pause the oldest sandboxes if there are more than max_num_sandboxes running.
-        In a multi user environment, this will pause sandboxes only for the current user.
-
-        Args:
-            max_num_sandboxes: Maximum number of sandboxes to keep running
-
-        Returns:
-            List of sandbox IDs that were paused
-        """
-
-        if max_num_sandboxes < 0:
-            raise ValueError('max_num_sandboxes must be >= 0')
-
-        running_sandboxes = await self._get_running_sandboxes_for_current_user()
-        if len(running_sandboxes) <= max_num_sandboxes:
-            return []
-
-        sandbox_ids = await self._pause_old_sandboxes(
-            max_num_sandboxes_to_keep_running=max_num_sandboxes,
-            running_sandboxes=running_sandboxes,
-        )
-
-        return sandbox_ids
-
-    async def raise_if_sandbox_limit_reached(self) -> None:
-        if self.max_num_sandboxes < 1:
-            raise ValueError('Maximum number of sandboxes must be greater than 0')
-
-        running_sandboxes = await self._get_running_sandboxes_for_current_user()
-        num_running = len(running_sandboxes)
-
-        if num_running >= self.max_num_sandboxes:
-            raise MaxSandboxLimitReachedError(
-                detail=(
-                    'You have reached the maximum number of running sandboxes '
-                    f'(current={num_running}, limit={self.max_num_sandboxes}). '
-                    'Stop or pause an existing sandbox and retry, or call again with '
-                    'auto_pause_existing=true to allow automatically pausing older sandboxes/conversations.'
-                )
-            )
-
     async def validate_sandbox_limit(
         self, sandbox_id: str | None = None, auto_pause_existing: bool = True
     ) -> None:
-        if not auto_pause_existing:
-            if not sandbox_id:
-                await self.raise_if_sandbox_limit_reached()
-            else:
-                sandbox_info = await self.get_sandbox(sandbox_id)
-                if sandbox_info and sandbox_info.status == SandboxStatus.PAUSED:
-                    await self.raise_if_sandbox_limit_reached()
+        if auto_pause_existing:
+            return
+
+        check_limit_for_resume = False
+        if sandbox_id:
+            sandbox_info = await self.get_sandbox(sandbox_id)
+            check_limit_for_resume = (not sandbox_info) or (
+                sandbox_info.status == SandboxStatus.PAUSED
+            )
+
+        if (not sandbox_id) or check_limit_for_resume:
+            if self.max_num_sandboxes < 1:
+                raise ValueError('Maximum number of sandboxes must be greater than 0')
+
+            running_sandboxes = await self._get_running_sandboxes_for_current_user()
+            num_running = len(running_sandboxes)
+
+            if num_running >= self.max_num_sandboxes:
+                raise MaxSandboxLimitReachedError(
+                    detail=(
+                        'You have reached the maximum number of running sandboxes '
+                        f'(current={num_running}, limit={self.max_num_sandboxes}). '
+                        'Stop or pause an existing sandbox and retry, or call again with '
+                        'auto_pause_existing=true to allow automatically pausing older sandboxes/conversations.'
+                    )
+                )
 
     async def enforce_max_num_sandboxes_limit(
         self, auto_pause_existing: bool
@@ -726,12 +703,26 @@ class RemoteSandboxService(SandboxService):
                 )
             )
 
-        sandbox_ids = await self._pause_old_sandboxes(
-            max_num_sandboxes_to_keep_running=self.max_num_sandboxes - 1,
-            running_sandboxes=running_sandboxes,
+        num_to_pause = len(running_sandboxes) - (self.max_num_sandboxes - 1)
+        sandboxes_to_pause = running_sandboxes[:num_to_pause]
+
+        # Stop the oldest sandboxes
+        paused_sandbox_ids = await self.batch_pause_sandboxes(
+            sandboxes_to_pause=sandboxes_to_pause
         )
 
-        return sandbox_ids
+        return paused_sandbox_ids
+
+    async def pause_old_sandboxes(self, max_num_sandboxes: int) -> list[str]:
+        """
+        Implementation of the SandboxService abstract method.
+
+        NOTE: This is a legacy bridge. 'enforce_max_num_sandboxes_limit' is the
+        primary entry point for limit management in the Remote implementation
+        as it handles the opt-out (429) logic.
+        """
+        # We ignore the passed max_num_sandboxes as enforce_max_num_sandboxes_limit uses self.max_num_sandboxes
+        return await self.enforce_max_num_sandboxes_limit(auto_pause_existing=True)
 
     async def batch_get_sandboxes(
         self, sandbox_ids: list[str]
