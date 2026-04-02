@@ -239,6 +239,24 @@ class ProviderHandler:
 
         return []
 
+    async def get_github_organizations(self) -> list[str]:
+        service = self.get_service(ProviderType.GITHUB)
+        try:
+            return await service.get_organizations_from_installations()  # type: ignore[attr-defined]
+        except Exception as e:
+            logger.warning(f'Failed to get github organizations {e}')
+
+        return []
+
+    async def get_gitlab_groups(self) -> list[str]:
+        service = self.get_service(ProviderType.GITLAB)
+        try:
+            return await service.get_user_groups()  # type: ignore[attr-defined]
+        except Exception as e:
+            logger.warning(f'Failed to get gitlab groups {e}')
+
+        return []
+
     async def get_azure_devops_organizations(self) -> list[str]:
         service = cast(
             InstallationsService, self.get_service(ProviderType.AZURE_DEVOPS)
@@ -471,7 +489,7 @@ class ProviderHandler:
     def check_cmd_action_for_provider_token_ref(
         cls, event: Action
     ) -> list[ProviderType]:
-        """Detect if agent run action is using a provider token (e.g $GITHUB_TOKEN)
+        """Detect if agent run action is using a provider token (e.g github_token)
         Returns a list of providers which are called by the agent
         """
         if not isinstance(event, CmdRunAction):

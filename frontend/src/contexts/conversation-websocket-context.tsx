@@ -27,12 +27,16 @@ import {
   isStatsConversationStateUpdateEvent,
   isExecuteBashActionEvent,
   isExecuteBashObservationEvent,
-  isConversationErrorEvent,
+  isDisplayableErrorEvent,
   isPlanningFileEditorObservationEvent,
   isBrowserObservationEvent,
   isBrowserNavigateActionEvent,
 } from "#/types/v1/type-guards";
 import { ConversationStateUpdateEventStats } from "#/types/v1/core/events/conversation-state-event";
+import type {
+  ConversationErrorEvent,
+  ServerErrorEvent,
+} from "#/types/v1/core/events/conversation-state-event";
 import { handleActionEventCacheInvalidation } from "#/utils/cache-utils";
 import { buildWebSocketUrl } from "#/utils/websocket-url";
 import type {
@@ -126,12 +130,14 @@ export function ConversationWebSocketProvider({
   const receivedEventCountRefMain = useRef(0);
   const receivedEventCountRefPlanning = useRef(0);
 
-  // Track the latest PlanningFileEditorObservation event during history replay
-  // We'll only call the API once after history loading completes
+  // Track the latest PlanningFileEditorObservation for Plan.md during history replay
   const latestPlanningFileEventRef = useRef<{
     path: string;
     conversationId: string;
   } | null>(null);
+
+  const isPlanFilePath = (path: string | null): boolean =>
+    path?.toUpperCase().endsWith("PLAN.MD") ?? false;
 
   // Helper function to update metrics from stats event
   const updateMetricsFromStats = useCallback(
@@ -350,25 +356,28 @@ export function ConversationWebSocketProvider({
         if (isV1Event(event)) {
           addEvent(event);
 
-          // Handle ConversationErrorEvent specifically - show error banner
+          // Handle displayable error events - show error banner
           // AgentErrorEvent errors are displayed inline in the chat, not as banners
-          if (isConversationErrorEvent(event)) {
+          if (isDisplayableErrorEvent(event)) {
+            const errorEvent = event as
+              | ConversationErrorEvent
+              | ServerErrorEvent;
             trackError({
-              message: event.detail,
+              message: errorEvent.detail,
               source: "conversation",
               metadata: {
-                eventId: event.id,
-                errorCode: event.code,
+                eventId: errorEvent.id,
+                errorCode: errorEvent.code,
               },
               posthog,
             });
-            if (isBudgetOrCreditError(event.detail)) {
+            if (isBudgetOrCreditError(errorEvent.detail)) {
               setErrorMessage(I18nKey.STATUS$ERROR_LLM_OUT_OF_CREDITS);
               trackCreditLimitReached({
                 conversationId: conversationId || "unknown",
               });
             } else {
-              setErrorMessage(event.detail);
+              setErrorMessage(errorEvent.detail);
             }
           } else {
             // Clear error message on any non-ConversationErrorEvent
@@ -513,25 +522,28 @@ export function ConversationWebSocketProvider({
           };
           addEvent(eventWithPlanningFlag);
 
-          // Handle ConversationErrorEvent specifically - show error banner
+          // Handle displayable error events - show error banner
           // AgentErrorEvent errors are displayed inline in the chat, not as banners
-          if (isConversationErrorEvent(event)) {
+          if (isDisplayableErrorEvent(event)) {
+            const errorEvent = event as
+              | ConversationErrorEvent
+              | ServerErrorEvent;
             trackError({
-              message: event.detail,
+              message: errorEvent.detail,
               source: "planning_conversation",
               metadata: {
-                eventId: event.id,
-                errorCode: event.code,
+                eventId: errorEvent.id,
+                errorCode: errorEvent.code,
               },
               posthog,
             });
-            if (isBudgetOrCreditError(event.detail)) {
+            if (isBudgetOrCreditError(errorEvent.detail)) {
               setErrorMessage(I18nKey.STATUS$ERROR_LLM_OUT_OF_CREDITS);
               trackCreditLimitReached({
                 conversationId: conversationId || "unknown",
               });
             } else {
-              setErrorMessage(event.detail);
+              setErrorMessage(errorEvent.detail);
             }
           } else {
             // Clear error message on any non-ConversationErrorEvent
@@ -612,37 +624,39 @@ export function ConversationWebSocketProvider({
             appendOutput(textContent);
           }
 
-          // Handle PlanningFileEditorObservation events - read and update plan content
+          // Handle PlanningFileEditorObservation - only update plan for Plan.md
           if (isPlanningFileEditorObservationEvent(event)) {
-            const planningAgentConversation = subConversations?.[0];
-            const planningConversationId = planningAgentConversation?.id;
+            const { path } = event.observation;
+            if (isPlanFilePath(path)) {
+              const planningAgentConversation = subConversations?.[0];
+              const planningConversationId = planningAgentConversation?.id;
 
-            if (planningConversationId && event.observation.path) {
-              // During history replay, track the latest event but don't call API
-              // After history loading completes, we'll call the API once with the latest event
-              if (isLoadingHistoryPlanning) {
-                latestPlanningFileEventRef.current = {
-                  path: event.observation.path,
-                  conversationId: planningConversationId,
-                };
-              } else {
-                // History loading is complete - this is a new real-time event
-                // Call the API immediately for real-time updates
-                readConversationFile(
-                  {
+              if (planningConversationId && path) {
+                if (isLoadingHistoryPlanning) {
+                  latestPlanningFileEventRef.current = {
+                    path,
                     conversationId: planningConversationId,
-                    filePath: event.observation.path,
-                  },
-                  {
-                    onSuccess: (fileContent) => {
-                      setPlanContent(fileContent);
+                  };
+                } else {
+                  readConversationFile(
+                    {
+                      conversationId: planningConversationId,
+                      filePath: path,
                     },
-                    onError: (error) => {
-                      // eslint-disable-next-line no-console
-                      console.warn("Failed to read conversation file:", error);
+                    {
+                      onSuccess: (fileContent) => {
+                        setPlanContent(fileContent);
+                      },
+                      onError: (error) => {
+                        // eslint-disable-next-line no-console
+                        console.warn(
+                          "Failed to read conversation file:",
+                          error,
+                        );
+                      },
                     },
-                  },
-                );
+                  );
+                }
               }
             }
           }
