@@ -64,6 +64,7 @@ def process_sandbox_service(mock_httpx_client, temp_dir):
         agent_server_module='openhands.agent_server',
         health_check_path='/alive',
         httpx_client=mock_httpx_client,
+        max_num_sandboxes=5,
     )
 
 

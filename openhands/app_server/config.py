@@ -16,6 +16,9 @@ from openhands.app_server.app_conversation.app_conversation_info_service import 
     AppConversationInfoService,
     AppConversationInfoServiceInjector,
 )
+from openhands.app_server.app_conversation.app_conversation_models import (
+    AppConversationStartRequest,
+)
 from openhands.app_server.app_conversation.app_conversation_service import (
     AppConversationService,
     AppConversationServiceInjector,
@@ -508,3 +511,16 @@ def depends_jwt_service():
 
 def depends_db_session():
     return Depends(get_global_config().db_session.depends)
+
+
+_sandbox_service_dependency = depends_sandbox_service()
+
+
+async def validate_sandbox_quota(
+    start_request: AppConversationStartRequest,
+    sandbox_service: SandboxService = _sandbox_service_dependency,
+) -> None:
+    await sandbox_service.validate_sandbox_limit(
+        sandbox_id=start_request.sandbox_id,
+        auto_pause_existing=start_request.auto_pause_existing,
+    )

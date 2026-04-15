@@ -11,7 +11,7 @@ from typing import Annotated, AsyncGenerator, Literal
 from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -49,6 +49,7 @@ from openhands.app_server.config import (
     depends_sandbox_spec_service,
     depends_user_context,
     get_app_conversation_service,
+    validate_sandbox_quota,
 )
 from openhands.app_server.sandbox.sandbox_models import (
     AGENT_SERVER,
@@ -340,7 +341,7 @@ async def batch_get_app_conversations(
     return app_conversations
 
 
-@router.post('')
+@router.post('', dependencies=[Depends(validate_sandbox_quota)])
 async def start_app_conversation(
     request: Request,
     start_request: AppConversationStartRequest,
@@ -349,13 +350,7 @@ async def start_app_conversation(
     app_conversation_service: AppConversationService = (
         app_conversation_service_dependency
     ),
-    sandbox_service: SandboxService = sandbox_service_dependency,
 ) -> AppConversationStartTask:
-    await sandbox_service.validate_sandbox_limit(
-        sandbox_id=start_request.sandbox_id,
-        auto_pause_existing=start_request.auto_pause_existing,
-    )
-
     # Because we are processing after the request finishes, keep the db connection open
     set_db_session_keep_open(request.state, True)
     set_httpx_client_keep_open(request.state, True)
@@ -388,22 +383,17 @@ async def update_app_conversation(
     return info
 
 
-@router.post('/stream-start')
+@router.post('/stream-start', dependencies=[Depends(validate_sandbox_quota)])
 async def stream_app_conversation_start(
-    request: AppConversationStartRequest,
+    start_request: AppConversationStartRequest,
     user_context: UserContext = user_context_dependency,
-    sandbox_service: SandboxService = sandbox_service_dependency,
 ) -> list[AppConversationStartTask]:
     """Start an app conversation start task and stream updates from it.
     Leaves the connection open until either the conversation starts or there was an error
     """
 
-    await sandbox_service.validate_sandbox_limit(
-        sandbox_id=request.sandbox_id, auto_pause_existing=request.auto_pause_existing
-    )
-
     response = StreamingResponse(
-        _stream_app_conversation_start(request, user_context),
+        _stream_app_conversation_start(start_request, user_context),
         media_type='application/json',
     )
     return response

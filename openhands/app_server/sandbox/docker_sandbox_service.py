@@ -374,7 +374,7 @@ class DockerSandboxService(SandboxService):
             )
 
         # Enforce sandbox limits by cleaning up old sandboxes
-        await self.pause_old_sandboxes(self.max_num_sandboxes - 1)
+        await self.enforce_max_num_sandboxes_limit(auto_pause_existing)
 
         if sandbox_spec_id is None:
             sandbox_spec = await self.sandbox_spec_service.get_default_sandbox_spec()
@@ -501,7 +501,7 @@ class DockerSandboxService(SandboxService):
     ) -> bool:
         """Resume a paused sandbox."""
         # Enforce sandbox limits by cleaning up old sandboxes
-        await self.pause_old_sandboxes(self.max_num_sandboxes - 1)
+        await self.enforce_max_num_sandboxes_limit(auto_pause_existing)
 
         try:
             if not sandbox_id.startswith(self.container_name_prefix):
@@ -582,6 +582,7 @@ class DockerSandboxServiceInjector(SandboxServiceInjector):
     container_name_prefix: str = 'oh-agent-server-'
     max_num_sandboxes: int = Field(
         default=5,
+        gt=0,
         description='Maximum number of sandboxes allowed to run simultaneously',
     )
     mounts: list[VolumeMount] = Field(default_factory=list)

@@ -81,6 +81,7 @@ class ProcessSandboxService(SandboxService):
     agent_server_module: str
     health_check_path: str
     httpx_client: httpx.AsyncClient
+    max_num_sandboxes: int
 
     def __post_init__(self):
         """Initialize the service after dataclass creation."""
@@ -293,6 +294,9 @@ class ProcessSandboxService(SandboxService):
         auto_pause_existing: bool = True,
     ) -> SandboxInfo:
         """Start a new sandbox."""
+        # Enforce sandbox limits by cleaning up old sandboxes
+        await self.enforce_max_num_sandboxes_limit(auto_pause_existing)
+
         # Get sandbox spec
         if sandbox_spec_id is None:
             sandbox_spec = await self.sandbox_spec_service.get_default_sandbox_spec()
@@ -349,6 +353,9 @@ class ProcessSandboxService(SandboxService):
         self, sandbox_id: str, auto_pause_existing: bool = True
     ) -> bool:
         """Resume a paused sandbox."""
+        # Enforce sandbox limits by cleaning up old sandboxes
+        await self.enforce_max_num_sandboxes_limit(auto_pause_existing)
+
         process_info = _processes.get(sandbox_id)
         if process_info is None:
             return False
@@ -435,6 +442,12 @@ class ProcessSandboxServiceInjector(SandboxServiceInjector):
         default='/alive', description='Health check endpoint path'
     )
 
+    max_num_sandboxes: int = Field(
+        default=5,
+        gt=0,
+        description='Maximum number of sandboxes allowed to run simultaneously',
+    )
+
     async def inject(
         self, state: InjectorState, request: Request | None = None
     ) -> AsyncGenerator[SandboxService, None]:
@@ -460,4 +473,5 @@ class ProcessSandboxServiceInjector(SandboxServiceInjector):
                 agent_server_module=self.agent_server_module,
                 health_check_path=self.health_check_path,
                 httpx_client=httpx_client,
+                max_num_sandboxes=self.max_num_sandboxes,
             )
