@@ -82,10 +82,13 @@ class SandboxService(ABC):
         Return False if the sandbox did not exist.
         """
 
-    async def _get_running_sandbox_ids_oldest_first(self) -> list[str]:
+    async def _get_active_sandbox_ids_oldest_first(self) -> list[str]:
         running_sandboxes: list[SandboxInfo] = []
         async for sandbox in page_iterator(self.search_sandboxes, limit=100):
-            if sandbox.status == SandboxStatus.RUNNING:
+            if (
+                sandbox.status == SandboxStatus.RUNNING
+                or sandbox.status == SandboxStatus.STARTING
+            ):
                 running_sandboxes.append(sandbox)
 
         running_sandboxes.sort(key=lambda x: x.created_at)
@@ -123,7 +126,7 @@ class SandboxService(ABC):
             )
 
         if (not sandbox_id) or check_limit_for_resume:
-            running_sandboxes = await self._get_running_sandbox_ids_oldest_first()
+            running_sandboxes = await self._get_active_sandbox_ids_oldest_first()
             num_running = len(running_sandboxes)
 
             if num_running >= self.max_num_sandboxes:
@@ -142,7 +145,7 @@ class SandboxService(ABC):
         """If auto_pause_existing, pause the oldest sandboxes if there are more than max_num_sandboxes_to_keep_running running.
         In a multi user environment, this will pause sandboxes only for the current user. else return 429."""
 
-        running_sandboxes = await self._get_running_sandbox_ids_oldest_first()
+        running_sandboxes = await self._get_active_sandbox_ids_oldest_first()
         num_running = len(running_sandboxes)
 
         if num_running < self.max_num_sandboxes:
@@ -284,17 +287,6 @@ class SandboxService(ABC):
 
         Return False if the sandbox did not exist.
         """
-
-    async def pause_old_sandboxes(self, max_num_sandboxes: int) -> list[str]:
-        """
-        Implementation of the SandboxService abstract method.
-
-        NOTE: This is a legacy bridge. 'enforce_max_num_sandboxes_limit' is the
-        primary entry point for limit management in the Remote implementation
-        as it handles the opt-out (429) logic.
-        """
-        # We ignore the passed max_num_sandboxes as enforce_max_num_sandboxes_limit uses self.max_num_sandboxes
-        return await self.enforce_max_num_sandboxes_limit(auto_pause_existing=True)
 
 
 class SandboxServiceInjector(DiscriminatedUnionMixin, Injector[SandboxService], ABC):

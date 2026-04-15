@@ -1,7 +1,7 @@
 """Tests for SandboxService base class.
 
 This module tests the SandboxService base class implementation, focusing on:
-- pause_old_sandboxes method functionality
+- enforce_max_num_sandboxes_limit_sandboxes method functionality
 - Proper handling of pagination when searching sandboxes
 - Correct filtering of running vs non-running sandboxes
 - Proper sorting by creation time (oldest first)
@@ -308,25 +308,6 @@ class TestEnforceSandboxLimit:
             await mock_sandbox_service.enforce_max_num_sandboxes_limit(
                 auto_pause_existing=True
             )
-
-    @pytest.mark.asyncio
-    async def test_legacy_pause_old_sandboxes(self, mock_sandbox_service):
-        """Test the legacy bridge method ignores the param and proxies to enforce_max."""
-        mock_sandbox_service.max_num_sandboxes = 2
-        now = datetime.now(timezone.utc)
-        sandboxes = [
-            create_sandbox_info('sb1', SandboxStatus.RUNNING, now - timedelta(hours=2)),
-            create_sandbox_info('sb2', SandboxStatus.RUNNING, now - timedelta(hours=1)),
-        ]
-        mock_sandbox_service.search_sandboxes_mock.return_value = SandboxPage(
-            items=sandboxes, next_page_id=None
-        )
-        mock_sandbox_service.pause_sandbox_mock.return_value = True
-
-        # Pass 999 to prove it ignores the argument and uses max_num_sandboxes=2
-        result = await mock_sandbox_service.pause_old_sandboxes(max_num_sandboxes=999)
-        assert len(result) == 1
-        assert result == ['sb1']
 
 
 class TestValidateSandboxLimit:

@@ -822,7 +822,7 @@ class TestSandboxLimitPolicy:
     async def test_enforce_limit_under_limit(self, remote_sandbox_service):
         """Test enforce limits does nothing when under the limit."""
         # Arrange: 5 running, limit is 10
-        remote_sandbox_service._get_running_sandbox_ids_oldest_first = AsyncMock(
+        remote_sandbox_service._get_active_sandbox_ids_oldest_first = AsyncMock(
             return_value=[f'sb-{i}' for i in range(5)]
         )
 
@@ -840,7 +840,7 @@ class TestSandboxLimitPolicy:
     ):
         """Test enforce limits raises 429 when at limit and auto_pause=False."""
         # Arrange: 10 running, limit is 10
-        remote_sandbox_service._get_running_sandbox_ids_oldest_first = AsyncMock(
+        remote_sandbox_service._get_active_sandbox_ids_oldest_first = AsyncMock(
             return_value=[f'sb-{i}' for i in range(10)]
         )
 
@@ -860,7 +860,7 @@ class TestSandboxLimitPolicy:
 
         # Arrange: 11 running, limit is 10
         running_sandboxes = [f'sb-{i}' for i in range(11)]
-        remote_sandbox_service._get_running_sandbox_ids_oldest_first = AsyncMock(
+        remote_sandbox_service._get_active_sandbox_ids_oldest_first = AsyncMock(
             return_value=running_sandboxes
         )
 
@@ -944,7 +944,7 @@ class TestSandboxLimitPolicy:
         )
 
         # Mock the state: sb-running is in the remote 'list'
-        remote_sandbox_service._get_running_sandbox_ids_oldest_first = AsyncMock(
+        remote_sandbox_service._get_active_sandbox_ids_oldest_first = AsyncMock(
             return_value=['sb-running']
         )
         remote_sandbox_service._get_stored_sandbox = AsyncMock(
@@ -984,7 +984,7 @@ class TestSandboxLimitPolicy:
         remote_sandbox_service.get_sandbox = AsyncMock()  # Not called for new sb
 
         # Mock 1 running sandbox (we are at limit)
-        remote_sandbox_service._get_running_sandbox_ids_oldest_first = AsyncMock(
+        remote_sandbox_service._get_active_sandbox_ids_oldest_first = AsyncMock(
             return_value=['sb-1']
         )
 
@@ -1007,7 +1007,7 @@ class TestSandboxLimitPolicy:
             return_value=MagicMock(status=SandboxStatus.PAUSED)
         )
         # Mock another sandbox already taking the slot
-        remote_sandbox_service._get_running_sandbox_ids_oldest_first = AsyncMock(
+        remote_sandbox_service._get_active_sandbox_ids_oldest_first = AsyncMock(
             return_value=['sb-active']
         )
 
@@ -1027,13 +1027,13 @@ class TestSandboxLimitPolicy:
         remote_sandbox_service.get_sandbox = AsyncMock(
             return_value=MagicMock(status=SandboxStatus.RUNNING)
         )
-        remote_sandbox_service._get_running_sandbox_ids_oldest_first = AsyncMock()
+        remote_sandbox_service._get_active_sandbox_ids_oldest_first = AsyncMock()
 
         # Should pass without calling the expensive 'list' operation
         await remote_sandbox_service.validate_sandbox_limit(
             sandbox_id=sandbox_id, auto_pause_existing=False
         )
-        remote_sandbox_service._get_running_sandbox_ids_oldest_first.assert_not_called()
+        remote_sandbox_service._get_active_sandbox_ids_oldest_first.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_validate_sandbox_limit_missing_info_defaults_to_check(
@@ -1042,7 +1042,7 @@ class TestSandboxLimitPolicy:
         """Safety Test: If sandbox_info is missing, we must check the limit (Defensive)."""
         remote_sandbox_service.max_num_sandboxes = 1
         remote_sandbox_service.get_sandbox = AsyncMock(return_value=None)
-        remote_sandbox_service._get_running_sandbox_ids_oldest_first = AsyncMock(
+        remote_sandbox_service._get_active_sandbox_ids_oldest_first = AsyncMock(
             return_value=['sb-active']
         )
 

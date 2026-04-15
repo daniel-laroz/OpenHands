@@ -578,7 +578,7 @@ class RemoteSandboxService(SandboxService):
             _logger.error(f'Error deleting sandbox {sandbox_id}: {e}')
             return False
 
-    async def _get_running_sandbox_ids_oldest_first(
+    async def _get_active_sandbox_ids_oldest_first(
         self,
     ) -> list[str]:
         """
