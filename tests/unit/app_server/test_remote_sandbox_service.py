@@ -540,6 +540,7 @@ class TestSandboxLifecycle:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.json.return_value = {'session_api_key': 'new-session-key-123'}
         remote_sandbox_service.httpx_client.request.return_value = mock_response
 
         # Execute
@@ -957,6 +958,7 @@ class TestSandboxLimitPolicy:
         # Mock the actions
         remote_sandbox_service.pause_sandbox = AsyncMock(return_value=True)
         mock_response = MagicMock(status_code=200)
+        mock_response.json.return_value = {'session_api_key': 'some-fake-key'}
         remote_sandbox_service.httpx_client.request = AsyncMock(
             return_value=mock_response
         )
