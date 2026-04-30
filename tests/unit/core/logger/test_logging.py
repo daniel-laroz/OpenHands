@@ -5,13 +5,13 @@ from unittest.mock import patch
 
 import pytest
 
-from openhands.core.config import LLMConfig, OpenHandsConfig
-from openhands.core.logger import (
+from openhands.app_server.utils.logger import (
     LOG_JSON_LEVEL_KEY,
     OpenHandsLoggerAdapter,
     json_log_handler,
 )
-from openhands.core.logger import openhands_logger as openhands_logger
+from openhands.app_server.utils.logger import openhands_logger as openhands_logger
+from openhands.core.config import OpenHandsConfig
 
 
 @pytest.fixture
@@ -72,20 +72,6 @@ def test_anthropic_api_key_masking(test_handler):
     assert api_key not in log_output
 
 
-def test_llm_config_attributes_masking(test_handler):
-    logger, stream = test_handler
-    llm_config = LLMConfig(
-        api_key='sk-abc123',
-        aws_access_key_id='AKIAIOSFODNN7EXAMPLE',
-        aws_secret_access_key='wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
-    )
-    logger.info(f'LLM Config: {llm_config}')
-    log_output = stream.getvalue()
-    assert 'sk-abc123' not in log_output
-    assert 'AKIAIOSFODNN7EXAMPLE' not in log_output
-    assert 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' not in log_output
-
-
 def test_app_config_attributes_masking(test_handler):
     logger, stream = test_handler
     app_config = OpenHandsConfig(search_api_key='search-xyz789')
@@ -107,7 +93,9 @@ def test_sensitive_env_vars_masking(test_handler):
         'JWT_SECRET': 'JWT_SECRET_VALUE',
     }
 
-    with patch.dict('openhands.core.logger.os.environ', environ, clear=True):
+    with patch.dict(
+        'openhands.app_server.utils.logger.os.environ', environ, clear=True
+    ):
         log_message = ' '.join(f"{attr}='{value}'" for attr, value in environ.items())
         logger.info(log_message)
 
@@ -123,7 +111,9 @@ def test_special_cases_masking(test_handler):
         'SANDBOX_ENV_GITHUB_TOKEN': 'SANDBOX_ENV_GITHUB_TOKEN_VALUE',
     }
 
-    with patch.dict('openhands.core.logger.os.environ', environ, clear=True):
+    with patch.dict(
+        'openhands.app_server.utils.logger.os.environ', environ, clear=True
+    ):
         log_message = ' '.join(
             f"{attr}={value} with no single quotes' and something"
             for attr, value in environ.items()

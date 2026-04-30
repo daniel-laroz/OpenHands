@@ -8,9 +8,9 @@
 # This module belongs to the old V0 web server. The V1 application server lives under openhands/app_server/.
 import os
 
-from openhands.core.logger import openhands_logger as logger
+from openhands.app_server.utils.import_utils import get_impl
+from openhands.app_server.utils.logger import openhands_logger as logger
 from openhands.server.types import AppMode, ServerConfigInterface
-from openhands.utils.import_utils import get_impl
 
 
 class ServerConfig(ServerConfigInterface):
@@ -22,17 +22,13 @@ class ServerConfig(ServerConfigInterface):
     hide_llm_settings = os.environ.get('HIDE_LLM_SETTINGS', 'false') == 'true'
     # This config is used to hide the microagent management page from the users for now. We will remove this once we release the new microagent management page.
     settings_store_class: str = (
-        'openhands.storage.settings.file_settings_store.FileSettingsStore'
+        'openhands.app_server.settings.file_settings_store.FileSettingsStore'
     )
     secret_store_class: str = (
-        'openhands.storage.secrets.file_secrets_store.FileSecretsStore'
+        'openhands.app_server.secrets.file_secrets_store.FileSecretsStore'
     )
-    conversation_store_class: str = (
-        'openhands.storage.conversation.file_conversation_store.FileConversationStore'
-    )
-    monitoring_listener_class: str = 'openhands.server.monitoring.MonitoringListener'
     user_auth_class: str = (
-        'openhands.server.user_auth.default_user_auth.DefaultUserAuth'
+        'openhands.app_server.user_auth.default_user_auth.DefaultUserAuth'
     )
     enable_v1: bool = os.getenv('ENABLE_V1') != '0'
 
