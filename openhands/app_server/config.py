@@ -31,6 +31,7 @@ from openhands.app_server.app_lifespan.app_lifespan_service import AppLifespanSe
 from openhands.app_server.app_lifespan.oss_app_lifespan_service import (
     OssAppLifespanService,
 )
+from openhands.app_server.config_api.config_models import AppMode
 from openhands.app_server.config_api.llm_model_service import (
     LLMModelService,
     LLMModelServiceInjector,
@@ -40,6 +41,8 @@ from openhands.app_server.event_callback.event_callback_service import (
     EventCallbackService,
     EventCallbackServiceInjector,
 )
+from openhands.app_server.file_store.files import FileStore
+from openhands.app_server.file_store.local import LocalFileStore
 from openhands.app_server.pending_messages.pending_message_service import (
     PendingMessageService,
     PendingMessageServiceInjector,
@@ -67,7 +70,6 @@ from openhands.app_server.web_client.web_client_config_injector import (
     WebClientConfigInjector,
 )
 from openhands.sdk.utils.models import OpenHandsModel
-from openhands.server.types import AppMode
 
 
 def get_default_persistence_dir() -> Path:
@@ -119,6 +121,14 @@ def get_openhands_provider_base_url() -> str | None:
     return os.getenv('OPENHANDS_PROVIDER_BASE_URL') or os.getenv('LLM_BASE_URL') or None
 
 
+def get_default_tavily_api_key() -> str | None:
+    """Return the Tavily API key from environment, if configured.
+
+    Falls back to SEARCH_API_KEY for backward compatibility.
+    """
+    return os.getenv('TAVILY_API_KEY') or os.getenv('SEARCH_API_KEY') or None
+
+
 # The SDK auto-fills this URL as the default for openhands/ and litellm_proxy/
 # models.  Deployments (e.g. staging) may use a different LLM proxy, configured
 # via OPENHANDS_PROVIDER_BASE_URL.
@@ -164,15 +174,25 @@ def resolve_provider_llm_base_url(
 
 
 def _get_default_lifespan():
-    # Check legacy parameters for saas mode. If we are in SAAS mode do not apply
-    # OpenHands alembic migrations
+    # Check legacy parameters for saas mode. If we are in SAAS mode use
+    # SaasAppLifespanService to initialize PostHog analytics
     if 'saas' in (os.getenv('OPENHANDS_CONFIG_CLS') or '').lower():
-        return None
+        from server.app_lifespan.saas_app_lifespan_service import (
+            SaasAppLifespanService,
+        )
+
+        return SaasAppLifespanService()
     return OssAppLifespanService()
+
+
+def _get_default_file_store() -> FileStore:
+    """Create a default LocalFileStore using the default persistence directory."""
+    return LocalFileStore(root=str(get_default_persistence_dir()))
 
 
 class AppServerConfig(OpenHandsModel):
     persistence_dir: Path = Field(default_factory=get_default_persistence_dir)
+    file_store: FileStore = Field(default_factory=_get_default_file_store)
     web_url: str | None = Field(
         default_factory=get_default_web_url,
         description='The URL where OpenHands is running (e.g., http://localhost:3000)',
@@ -188,6 +208,10 @@ class AppServerConfig(OpenHandsModel):
     openhands_provider_base_url: str | None = Field(
         default_factory=get_openhands_provider_base_url,
         description='Base URL for the OpenHands provider',
+    )
+    tavily_api_key: str | None = Field(
+        default_factory=get_default_tavily_api_key,
+        description='Tavily API key for search integration (proxied via MCP server)',
     )
     # Dependency Injection Injectors
     llm_model: LLMModelServiceInjector | None = None
@@ -380,13 +404,7 @@ def config_from_env() -> AppServerConfig:
         )
 
     if config.app_conversation is None:
-        tavily_api_key = None
-        tavily_api_key_str = os.getenv('TAVILY_API_KEY') or os.getenv('SEARCH_API_KEY')
-        if tavily_api_key_str:
-            tavily_api_key = SecretStr(tavily_api_key_str)
-        config.app_conversation = LiveStatusAppConversationServiceInjector(
-            tavily_api_key=tavily_api_key
-        )
+        config.app_conversation = LiveStatusAppConversationServiceInjector()
 
     if config.pending_message is None:
         from openhands.app_server.pending_messages.pending_message_service import (

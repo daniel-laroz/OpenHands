@@ -29,14 +29,14 @@ from openhands.app_server.integrations.provider import ProviderToken
 from openhands.app_server.integrations.service_types import ProviderType
 from openhands.app_server.settings.llm_profiles import LLMProfiles
 from openhands.app_server.utils.jsonpatch_compat import deep_merge
-from openhands.app_server.utils.sdk_settings_compat import (
+from openhands.sdk.settings import (
     ACPAgentSettings,
     AgentSettingsConfig,
-    LLMAgentSettings,
+    ConversationSettings,
+    OpenHandsAgentSettings,
     default_agent_settings,
     validate_agent_settings,
 )
-from openhands.sdk.settings import ConversationSettings
 
 
 def _coerce_value(value: Any) -> Any:
@@ -253,7 +253,7 @@ class Settings(BaseModel):
     @field_serializer('agent_settings')
     def agent_settings_serializer(
         self,
-        agent_settings: LLMAgentSettings | ACPAgentSettings,
+        agent_settings: OpenHandsAgentSettings | ACPAgentSettings,
         info: SerializationInfo,
     ) -> dict[str, Any]:
         context = info.context or {}
@@ -274,9 +274,31 @@ class Settings(BaseModel):
 
         Raises :class:`ProfileNotFoundError` if ``name`` isn't a saved profile.
         """
+        # Copy the LLM so post-activation fixups (e.g. resolving ``base_url``
+        # against the provider default) don't bleed back into the saved
+        # profile. ``model_copy(update={'llm': llm})`` is shallow, so the
+        # update value is shared with ``llm_profiles.profiles[name]``.
         llm = self.llm_profiles.require(name)
-        self.agent_settings = self.agent_settings.model_copy(update={'llm': llm})
+        self.agent_settings = self.agent_settings.model_copy(
+            update={'llm': llm.model_copy()}
+        )
         self.llm_profiles.active = name
+
+    def delete_profile(self, name: str) -> bool:
+        """Delete a saved profile, promoting a fallback when it was active.
+
+        Returns False if the profile didn't exist; True otherwise. When the
+        deleted profile was active and other profiles remain, switches to
+        the first remaining one (insertion order — same ordering ``rename``
+        relies on) so the user isn't left without an active LLM.
+        """
+        was_active = self.llm_profiles.active == name
+        if not self.llm_profiles.delete(name):
+            return False
+        if was_active and self.llm_profiles.profiles:
+            fallback = next(iter(self.llm_profiles.profiles))
+            self.switch_to_profile(fallback)
+        return True
 
     @model_validator(mode='before')
     @classmethod
@@ -292,7 +314,7 @@ class Settings(BaseModel):
         agent_settings = data.get('agent_settings')
         if isinstance(agent_settings, dict):
             data['agent_settings'] = _coerce_dict_secrets(agent_settings)
-        elif isinstance(agent_settings, (LLMAgentSettings, ACPAgentSettings)):
+        elif isinstance(agent_settings, (OpenHandsAgentSettings, ACPAgentSettings)):
             data['agent_settings'] = agent_settings.model_dump(
                 mode='json', context={'expose_secrets': True}
             )
@@ -332,7 +354,7 @@ class Settings(BaseModel):
     def secrets_store_serializer(self, secrets: Any, info: SerializationInfo):
         return {'provider_tokens': {}}
 
-    def to_agent_settings(self) -> LLMAgentSettings | ACPAgentSettings:
+    def to_agent_settings(self) -> OpenHandsAgentSettings | ACPAgentSettings:
         return self.agent_settings
 
     def get_agent_settings_display(self) -> dict[str, Any]:

@@ -96,16 +96,15 @@ from openhands.app_server.utils.llm_metadata import (
     get_llm_metadata,
     should_set_litellm_extra_body,
 )
-from openhands.app_server.utils.sdk_settings_compat import ACPAgentSettings
 from openhands.sdk import Agent, AgentContext, LocalWorkspace
 from openhands.sdk.agent.acp_agent import ACPAgent
 from openhands.sdk.hooks import HookConfig
 from openhands.sdk.llm import LLM
 from openhands.sdk.plugin import PluginSource
 from openhands.sdk.secret import LookupSecret, StaticSecret
+from openhands.sdk.settings import ACPAgentSettings
 from openhands.sdk.utils.paging import page_iterator
 from openhands.sdk.workspace.remote.async_remote_workspace import AsyncRemoteWorkspace
-from openhands.server.types import AppMode
 from openhands.tools.preset.default import (
     get_default_tools,
 )
@@ -130,18 +129,18 @@ def _split_ids_by_kind(
     conversation_ids: list[str],
     conversation_kind_by_id: dict[str, str],
 ) -> tuple[list[str], list[str]]:
-    """Split conversation IDs into (llm_ids, acp_ids) based on their agent_kind."""
-    llm_ids = [
+    """Split conversation IDs into (openhands_ids, acp_ids) by agent_kind."""
+    openhands_ids = [
         cid
         for cid in conversation_ids
-        if conversation_kind_by_id.get(cid, 'llm') != 'acp'
+        if conversation_kind_by_id.get(cid, 'openhands') != 'acp'
     ]
     acp_ids = [
         cid
         for cid in conversation_ids
-        if conversation_kind_by_id.get(cid, 'llm') == 'acp'
+        if conversation_kind_by_id.get(cid, 'openhands') == 'acp'
     ]
-    return llm_ids, acp_ids
+    return openhands_ids, acp_ids
 
 
 # Planning agent instruction to prevent "Ready to proceed?" behavior
@@ -180,7 +179,6 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
     openhands_provider_base_url: str | None
     access_token_hard_timeout: timedelta | None
     app_mode: str | None = None
-    tavily_api_key: str | None = None
 
     async def _get_sandbox_grouping_strategy(self) -> SandboxGroupingStrategy:
         """Get the sandbox grouping strategy from user settings."""
@@ -380,7 +378,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 display_model = start_conversation_request.agent.acp_model
             else:
                 info = ConversationInfo.model_validate(response.json())
-                agent_kind = 'llm'
+                agent_kind = 'openhands'
                 display_model = start_conversation_request.agent.llm.model
 
             # Store info...
@@ -517,7 +515,9 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
 
         conversation_kind_by_id = conversation_kind_by_id or {}
 
-        llm_ids, acp_ids = _split_ids_by_kind(conversation_ids, conversation_kind_by_id)
+        openhands_ids, acp_ids = _split_ids_by_kind(
+            conversation_ids, conversation_kind_by_id
+        )
 
         agent_server_url = self._get_agent_server_url(sandbox)
         headers: dict[str, str] = {}
@@ -526,12 +526,12 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
 
         results: list[ConversationInfo | ACPConversationInfo] = []
 
-        # Fetch LLM conversations
-        if llm_ids:
+        # Fetch OpenHands conversations
+        if openhands_ids:
             try:
                 url = f'{agent_server_url.rstrip("/")}/api/conversations'
                 response = await self.httpx_client.get(
-                    url, params={'ids': llm_ids}, headers=headers
+                    url, params={'ids': openhands_ids}, headers=headers
                 )
                 response.raise_for_status()
                 data = response.json()
@@ -539,12 +539,12 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 results.extend(c for c in infos if c)
             except httpx.HTTPStatusError:
                 _logger.warning(
-                    f'Error getting LLM conversation status from sandbox {sandbox.id}',
+                    f'Error getting OpenHands conversation status from sandbox {sandbox.id}',
                     exc_info=True,
                 )
             except Exception:
                 _logger.exception(
-                    f'Error getting LLM conversation status from sandbox {sandbox.id}',
+                    f'Error getting OpenHands conversation status from sandbox {sandbox.id}',
                     stack_info=True,
                 )
 
@@ -994,44 +994,23 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             usage_id='agent',
         )
 
-    async def _get_tavily_api_key(self, user: UserInfo) -> str | None:
-        """Get Tavily search API key, prioritizing user's key over service key.
-
-        Args:
-            user: User information
-
-        Returns:
-            Tavily API key if available, None otherwise
-        """
-        # Get the actual API key values, prioritizing user's key over service key
-        user_search_key = None
-        if user.search_api_key:
-            key_value = user.search_api_key.get_secret_value()
-            if key_value and key_value.strip():
-                user_search_key = key_value
-
-        service_tavily_key = None
-        if self.tavily_api_key:
-            # tavily_api_key is already a string (extracted in the factory method)
-            if self.tavily_api_key.strip():
-                service_tavily_key = self.tavily_api_key
-
-        return user_search_key or service_tavily_key
-
     async def _add_system_mcp_servers(
-        self, mcp_servers: dict[str, Any], user: UserInfo, conversation_id: UUID
+        self, mcp_servers: dict[str, Any], conversation_id: UUID
     ) -> None:
-        """Add system-generated MCP servers (default OpenHands server and Tavily).
+        """Add system-generated MCP servers (default OpenHands server).
+
+        The default server includes the Tavily search proxy if configured.
+        Tavily search is proxied through the app server to avoid exposing
+        the API key to sandboxes.
 
         Args:
             mcp_servers: Dictionary to add servers to
-            user: User information for API keys
             conversation_id: Conversation ID forwarded to the OpenHands MCP server
         """
         if not self.web_url:
             return
 
-        # Add default OpenHands MCP server
+        # Add default OpenHands MCP server (includes Tavily proxy if configured)
         mcp_url = f'{self.web_url}/mcp/mcp'
         mcp_servers['default'] = {
             'url': mcp_url,
@@ -1042,16 +1021,6 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         mcp_api_key = await self.user_context.get_mcp_api_key()
         if mcp_api_key:
             mcp_servers['default']['headers']['X-Session-API-Key'] = mcp_api_key
-
-        # Add Tavily search if API key is available
-        tavily_api_key = await self._get_tavily_api_key(user)
-        if tavily_api_key:
-            _logger.info('Adding search engine to MCP config')
-            mcp_servers['tavily'] = {
-                'url': f'https://mcp.tavily.com/mcp/?tavilyApiKey={tavily_api_key}'
-            }
-        else:
-            _logger.info('No search engine API key found, skipping search engine')
 
     def _merge_custom_mcp_config(
         self, mcp_servers: dict[str, Any], user: UserInfo
@@ -1108,8 +1077,8 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         # Configure MCP - SDK expects format: {'mcpServers': {'server_name': {...}}}
         mcp_servers: dict[str, Any] = {}
 
-        # Add system-generated servers (default + tavily)
-        await self._add_system_mcp_servers(mcp_servers, user, conversation_id)
+        # Add system-generated servers (default MCP server with Tavily proxy)
+        await self._add_system_mcp_servers(mcp_servers, conversation_id)
 
         # Merge custom servers from user settings
         self._merge_custom_mcp_config(mcp_servers, user)
@@ -1600,15 +1569,6 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             **dict(acp_settings.acp_env or {}),
         }
 
-        acp_agent = ACPAgent(
-            acp_command=acp_settings.acp_command,
-            acp_args=acp_settings.acp_args,
-            acp_env=merged_env,
-            acp_model=acp_settings.acp_model,
-            acp_session_mode=acp_settings.acp_session_mode,
-            acp_prompt_timeout=acp_settings.acp_prompt_timeout,
-        )
-
         # Pass user secrets via AgentContext so the SDK renders a
         # <CUSTOM_SECRETS> block in the ACP prompt and injects values into
         # the subprocess env at start time (SDK PR #2984).
@@ -1622,8 +1582,21 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             )
             is True
         )
-        if secrets and _sdk_supports_acp_secrets:
-            acp_agent.agent_context = AgentContext(secrets=secrets)
+        agent_context = (
+            AgentContext(secrets=secrets)
+            if secrets and _sdk_supports_acp_secrets
+            else None
+        )
+
+        acp_agent = ACPAgent(
+            acp_command=acp_settings.acp_command,
+            acp_args=acp_settings.acp_args,
+            acp_env=merged_env,
+            acp_model=acp_settings.acp_model,
+            acp_session_mode=acp_settings.acp_session_mode,
+            acp_prompt_timeout=acp_settings.acp_prompt_timeout,
+            agent_context=agent_context,
+        )
 
         sdk_plugins: list[PluginSource] | None = None
         if plugins:
@@ -2088,10 +2061,6 @@ class LiveStatusAppConversationServiceInjector(AppConversationServiceInjector):
             'be retrieved by a sandboxed conversation.'
         ),
     )
-    tavily_api_key: SecretStr | None = Field(
-        default=None,
-        description='The Tavily Search API key to add to MCP integration',
-    )
 
     async def inject(
         self, state: InjectorState, request: Request | None = None
@@ -2141,7 +2110,7 @@ class LiveStatusAppConversationServiceInjector(AppConversationServiceInjector):
             # Get app_mode for SaaS mode
             app_mode = None
             try:
-                from openhands.server.shared import server_config
+                from openhands.app_server.shared import server_config
 
                 app_mode = (
                     server_config.app_mode.value if server_config.app_mode else None
@@ -2149,14 +2118,6 @@ class LiveStatusAppConversationServiceInjector(AppConversationServiceInjector):
             except (ImportError, AttributeError):
                 # If server_config is not available (e.g., in tests), continue without it
                 pass
-
-            # We supply the global tavily key only if the app mode is not SAAS, where
-            # currently the search endpoints are patched into the app server instead
-            # so the tavily key does not need to be shared
-            if self.tavily_api_key and app_mode != AppMode.SAAS:
-                tavily_api_key = self.tavily_api_key.get_secret_value()
-            else:
-                tavily_api_key = None
 
             yield LiveStatusAppConversationService(
                 init_git_in_empty_workspace=self.init_git_in_empty_workspace,
@@ -2177,5 +2138,4 @@ class LiveStatusAppConversationServiceInjector(AppConversationServiceInjector):
                 openhands_provider_base_url=config.openhands_provider_base_url,
                 access_token_hard_timeout=access_token_hard_timeout,
                 app_mode=app_mode,
-                tavily_api_key=tavily_api_key,
             )
